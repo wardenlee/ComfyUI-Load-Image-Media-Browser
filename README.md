@@ -5,7 +5,7 @@
 ## Screenshots
 
 ### Demo Media Browser
-![Demo](images/demo.gif)
+![Demo](images/PixPin_2026-09-19_23-46-33.png)
 
 ### Node Overview
 ![Nodes](images/Nodes_1.jpg)
