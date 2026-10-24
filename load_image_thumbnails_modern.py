@@ -1,6 +1,8 @@
 import hashlib
 import mimetypes
 import os
+import re
+import shutil
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -14,7 +16,7 @@ import folder_paths
 from server import PromptServer
 import nodes
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 ALLOWED_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".jxl", ".apng", ".ico"
 }
@@ -37,8 +39,41 @@ def _safe_rel_path(value: str) -> str:
     return "/".join(parts)
 
 
+# ComfyUI stores edited images as "<file> [input]" / "[output]" / "[temp]"
+# (see folder_paths.annotated_filepath / get_annotated_filepath). The mask
+# editor and the painter both write that suffix into the widget value, so the
+# backend must resolve it exactly like the native LoadImage node does.
+ANNOTATED_SUFFIX_RE = re.compile(r"\s*\[(input|output|temp)\]\s*$", re.IGNORECASE)
+
+
+def _split_annotation(value: str) -> Tuple[str, str]:
+    raw = str(value or "")
+    match = ANNOTATED_SUFFIX_RE.search(raw)
+    if not match:
+        return raw, None
+    return raw[: match.start()], match.group(1).lower()
+
+
+def _annotation_base_dir(kind: str) -> Path:
+    if kind == "output":
+        return Path(folder_paths.get_output_directory()).resolve()
+    if kind == "temp":
+        return Path(folder_paths.get_temp_directory()).resolve()
+    return _input_root()
+
+
 def _resolve_input_file(value: str) -> Path:
-    rel = _safe_rel_path(value)
+    name, annotation = _split_annotation(value)
+    if annotation:
+        base = _annotation_base_dir(annotation)
+        parts = [p for p in str(name or "").replace("\\", "/").lstrip("/").split("/") if p not in ("", ".")]
+        if any(p == ".." for p in parts):
+            raise ValueError("Parent path traversal is not allowed")
+        candidate = (base / "/".join(parts)).resolve()
+        if base != candidate and base not in candidate.parents:
+            raise ValueError("Resolved path escapes the allowed directory")
+        return candidate
+    rel = _safe_rel_path(name)
     candidate = (_input_root() / rel).resolve()
     root = _input_root()
     if root != candidate and root not in candidate.parents:
@@ -243,3 +278,45 @@ async def thumbnails_modern_delete(request):
         return web.json_response({"ok": True, "deleted": relpath})
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
+def _delete_folder_tree(relpath: str) -> Dict[str, object]:
+    """Delete a folder (recursively) that lives inside the ComfyUI input tree."""
+    name, _ = _split_annotation(relpath)
+    try:
+        rel = _safe_rel_path(name)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not rel:
+        return {"ok": False, "error": "Refusing to delete the input root"}
+
+    root = _input_root()
+    target = (root / rel).resolve()
+    if target == root or root not in target.parents:
+        return {"ok": False, "error": "Folder is outside the input directory"}
+    if not target.exists():
+        return {"ok": False, "error": "Folder not found"}
+    if target.is_symlink() or not target.is_dir():
+        return {"ok": False, "error": "Not a folder"}
+
+    try:
+        files = sum(1 for path in target.rglob("*") if path.is_file())
+        shutil.rmtree(target)
+        _scan_input_tree(force=True)
+        return {"ok": True, "deleted": rel, "files": files}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@PromptServer.instance.routes.post("/thumbnails-modern/delete_folder")
+async def thumbnails_modern_delete_folder(request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    result = _delete_folder_tree((payload or {}).get("relpath", ""))
+    status = 200
+    if not result.get("ok"):
+        status = 404 if result.get("error") == "Folder not found" else 400
+    return web.json_response(result, status=status)

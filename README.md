@@ -29,7 +29,10 @@ It adds a media browser to the native **Load Image** and **Load Video** nodes in
   - date ascending
   - name A–Z
   - name Z–A
-- direct file deletion from the browser
+- direct file deletion from the browser (single file, multi-select delete button, and whole-folder delete)
+- **Multi** only toggles multi-select mode; the **Delete** button next to it deletes the selected files (stays visible, greyed out when nothing is selected)
+- **Upload folder** and **Delete folder** live at the bottom of the folders sidebar
+- after saving an edit in the **Mask Editor** or the **Painter**, the node keeps loading the edited image (annotated `"<file> [input]"` widget values are resolved the same way as the native Load Image node)
 - mixed aspect ratio thumbnail support
 - automatic node resizing for media previews
 - aspect-ratio presets for:
@@ -93,7 +96,7 @@ Replace the old folder, restart ComfyUI, and hard refresh the web UI.
 
 ## Release
 
-Current version: **1.0.0**
+Current version: **1.0.1**
 
 ## Suggested GitHub topics
 

@@ -57,8 +57,21 @@ function normalizeFolder(value) {
   return value && value !== "" ? value : ".";
 }
 
+// ComfyUI's mask editor / painter store the edited image and set the widget to
+// "<file> [input]" (see folder_paths.annotated_filepath). Strip that suffix for
+// listing / preview / folder logic, but keep it on the widget value itself.
+const ANNOTATION_SUFFIX_RE = /\s*\[(?:input|output|temp)\]\s*$/i;
+
+function stripAnnotation(value) {
+  return String(value || "").replace(ANNOTATION_SUFFIX_RE, "");
+}
+
+function hasAnnotation(value) {
+  return ANNOTATION_SUFFIX_RE.test(String(value || "").trim());
+}
+
 function splitRelpath(relpath) {
-  const v = String(relpath || "").replace(/\\/g, "/");
+  const v = stripAnnotation(relpath).replace(/\\/g, "/");
   const m = v.match(/^(input|r\d+):/);
   if (m) return { root: m[1], rel: v.slice(m[0].length) };
   return { root: "input", rel: v };
@@ -108,11 +121,14 @@ function updateWidgetChoicesForFolder(node, folder, data = currentData) {
   const values = items.map((item) => item.relpath);
   const currentValue = widget.value;
   widget.options = widget.options || {};
-  if (values.length) {
-    widget.options.values = values;
-    if (currentValue && !values.includes(currentValue)) {
-      widget.value = values[0];
-    }
+  if (!values.length) return;
+  // Keep annotated values ("<file> [input]", written by the mask editor and the
+  // painter after saving an edit) instead of replacing them with the first file,
+  // otherwise the node would silently keep loading the original image.
+  const annotated = hasAnnotation(currentValue);
+  widget.options.values = annotated && !values.includes(currentValue) ? values.concat([currentValue]) : values;
+  if (!annotated && currentValue && !values.includes(currentValue)) {
+    widget.value = values[0];
   }
 }
 
@@ -139,7 +155,11 @@ function ensureStyles() {
     .tm-btn{border:1px solid var(--border-color, #555);background:var(--comfy-input-bg, #2c2c2c);color:inherit;border-radius:10px;padding:8px 12px;cursor:pointer}
     .tm-btn:hover{filter:brightness(1.08)}
     .tm-search{flex:1;min-width:180px;border:1px solid var(--border-color, #555);background:var(--comfy-input-bg, #2c2c2c);color:inherit;border-radius:10px;padding:8px 10px}
-    .tm-folder-list{overflow:auto;padding:8px}
+    .tm-folder-list{overflow:auto;padding:8px;flex:1;min-height:0}
+    .tm-sidebar-footer{display:flex;gap:8px;padding:10px;border-top:1px solid var(--border-color, #444)}
+    .tm-sidebar-footer .tm-btn{flex:1;padding:6px 8px;font-size:12px;text-align:center}
+    .tm-btn:disabled{opacity:.45;cursor:not-allowed}
+    .tm-btn:disabled:hover{filter:none}
     .tm-root-select{width:calc(100% - 16px);margin:4px 8px 0;padding:8px 10px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:calc(100% - 16px)}
     .tm-folder{display:flex;justify-content:space-between;gap:8px;padding:10px 12px;border-radius:10px;cursor:pointer}
     .tm-folder:hover,.tm-folder.active{background:rgba(255,255,255,.08)}
@@ -178,6 +198,10 @@ function ensureDialog() {
         <div class="tm-head"><div class="tm-title">Folders</div></div>
         <select class="tm-btn tm-root-select" title="Media root"></select>
         <div class="tm-folder-list"></div>
+        <div class="tm-sidebar-footer">
+          <button class="tm-btn tm-upload-folder" title="Upload an entire folder (subfolders preserved)">Upload folder</button>
+          <button class="tm-btn tm-danger tm-folder-delete" title="Delete the selected folder and everything inside it">Delete folder</button>
+        </div>
       </div>
       <div class="tm-main">
         <div class="tm-head">
@@ -191,10 +215,9 @@ function ensureDialog() {
             <option value="name_asc">Name A–Z</option>
             <option value="name_desc">Name Z–A</option>
           </select>
-          <button class="tm-btn tm-multi" title="Toggle multi-select (pick several files, then Delete selected)">Multi</button>
-          <button class="tm-btn tm-danger tm-del-sel" style="display:none">Delete selected</button>
+          <button class="tm-btn tm-multi" title="Toggle multi-select mode (pick several files, then press Delete)">Multi</button>
           <button class="tm-btn tm-upload" title="Upload multiple files to the input folder">Upload</button>
-          <button class="tm-btn tm-upload-folder" title="Upload an entire folder (subfolders preserved)">Folder</button>
+          <button class="tm-btn tm-danger tm-delete" disabled title="Delete the selected files">Delete</button>
           <button class="tm-btn tm-refresh">Refresh</button>
           <button class="tm-btn tm-close">Close</button>
         </div>
@@ -211,7 +234,8 @@ function ensureDialog() {
   overlay.querySelector(".tm-upload").addEventListener("click", triggerUpload);
   overlay.querySelector(".tm-upload-folder").addEventListener("click", uploadFolder);
   overlay.querySelector(".tm-multi").addEventListener("click", toggleMultiSelect);
-  overlay.querySelector(".tm-del-sel").addEventListener("click", deleteSelected);
+  overlay.querySelector(".tm-delete").addEventListener("click", deleteSelected);
+  overlay.querySelector(".tm-folder-delete").addEventListener("click", deleteCurrentFolder);
   enableDragDrop(overlay);
   overlay.querySelector(".tm-root-select").addEventListener("change", (event) => {
     currentRoot = event.target.value || "input";
@@ -427,19 +451,22 @@ function toggleMultiSelect() {
   selectedSet.clear();
   const multiBtn = dialog?.querySelector(".tm-multi");
   if (multiBtn) multiBtn.classList.toggle("active", multiSelect);
-  updateDeleteSelectedButton();
+  updateDeleteButton();
   renderGrid();
 }
 
-function updateDeleteSelectedButton() {
-  const delBtn = dialog?.querySelector(".tm-del-sel");
-  if (!delBtn) return;
-  if (multiSelect && selectedSet.size > 0) {
-    delBtn.style.display = "";
-    delBtn.textContent = `Delete selected (${selectedSet.size})`;
-  } else {
-    delBtn.style.display = "none";
-  }
+function updateDeleteButton() {
+  const btn = dialog?.querySelector(".tm-delete");
+  if (!btn) return;
+  const count = multiSelect ? selectedSet.size : 0;
+  btn.disabled = count === 0;
+  btn.textContent = count > 0 ? `Delete (${count})` : "Delete";
+}
+
+function updateFolderDeleteButton() {
+  const btn = dialog?.querySelector(".tm-folder-delete");
+  if (!btn) return;
+  btn.disabled = normalizeFolder(currentFolder) === ".";
 }
 
 async function deleteMany(relpaths) {
@@ -462,10 +489,56 @@ async function deleteSelected() {
   if (!confirm(`Delete ${targets.length} selected file(s)?\n${targets.join("\n")}`)) return;
   const { ok, failed } = await deleteMany(targets);
   for (const rel of ok) selectedSet.delete(rel);
-  updateDeleteSelectedButton();
+  updateDeleteButton();
   await refreshListingInPlace(true);
   const msg = `Deleted ${ok.length} file(s)` + (failed.length ? `, ${failed.length} failed:\n${failed.join("\n")}` : "");
   alert(msg);
+}
+
+// ---- Delete the whole selected folder (sidebar bottom button) ----
+async function deleteCurrentFolder() {
+  const folder = normalizeFolder(currentFolder);
+  if (folder === ".") return;
+  const count = (currentData?.images || []).filter(
+    (item) => item.folder === folder || String(item.folder || "").startsWith(folder + "/")
+  ).length;
+  const label = folder;
+  if (!confirm(`Delete folder "${label}"${count ? ` and all ${count} file(s) inside` : ""}?\nThis cannot be undone.`)) return;
+
+  const btn = dialog?.querySelector(".tm-folder-delete");
+  if (btn) btn.disabled = true;
+  try {
+    const response = await api.fetchApi("/thumbnails-modern/delete_folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ relpath: folder }),
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+
+    const parent = folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/")) : ".";
+    multiSelect = false;
+    selectedSet.clear();
+    const multiBtn = dialog?.querySelector(".tm-multi");
+    if (multiBtn) multiBtn.classList.remove("active");
+
+    currentFolder = parent;
+    rememberFolder(currentNode, currentFolder);
+    await refreshListingInPlace(true);
+    const parentExists = (currentData?.folders || []).some((item) => item.path === currentFolder);
+    if (!parentExists) currentFolder = ".";
+    rememberFolder(currentNode, currentFolder);
+    updateWidgetChoicesForFolder(currentNode, currentFolder, currentData);
+    renderFolders();
+    renderGrid();
+    updateDeleteButton();
+    const extra = payload.files != null ? ` (${payload.files} file(s))` : "";
+    alert(`Deleted folder "${label}"${extra}`);
+  } catch (err) {
+    alert(`Delete folder failed: ${err.message || err}`);
+  } finally {
+    updateFolderDeleteButton();
+  }
 }
 
 // ---- Refresh in place (keeps search/folder/selection) ----
@@ -704,6 +777,7 @@ function renderFolders() {
     });
     list.appendChild(el);
   }
+  updateFolderDeleteButton();
 }
 
 function renderGrid() {
@@ -770,7 +844,7 @@ function renderGrid() {
         const mark = card.querySelector(".tm-selmark");
         if (mark) mark.style.display = selectedSet.has(item.relpath) ? "" : "none";
         card.classList.toggle("tm-selected", selectedSet.has(item.relpath));
-        updateDeleteSelectedButton();
+        updateDeleteButton();
       });
     } else if (usableInNode) {
       card.addEventListener("click", () => setNodeMedia(currentNode, item.relpath));
@@ -844,8 +918,8 @@ async function openDialog(node, refresh = false) {
   selectedSet.clear();
   const multiBtn = dialog.querySelector(".tm-multi");
   if (multiBtn) multiBtn.classList.remove("active");
-  const delBtn = dialog.querySelector(".tm-del-sel");
-  if (delBtn) delBtn.style.display = "none";
+  updateDeleteButton();
+  updateFolderDeleteButton();
   dialog.querySelector(".tm-search").value = "";
   renderFolders();
   renderGrid();
