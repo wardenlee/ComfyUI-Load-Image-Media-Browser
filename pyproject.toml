@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-load-image-media-browser"
-version = "1.0.1"
+version = "1.0.2"
 description = "Load Image Media Browser for ComfyUI"
 license = {text = "AGPL-3.0-or-later"}
 requires-python = ">=3.10"

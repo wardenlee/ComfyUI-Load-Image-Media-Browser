@@ -12,7 +12,7 @@
 
 ## Features
 
-It adds a media browser to the native **Load Image** and **Load Video** nodes in ComfyUI, making it easier to browse, preview, sort, and select files from the `input` directory.
+It adds a media browser to the native **Load Image** and **Load Video** nodes in ComfyUI, making it easier to browse, preview, sort, and select files from the ComfyUI `input` and `output` directories.
 
 ## Features
 
@@ -31,7 +31,10 @@ It adds a media browser to the native **Load Image** and **Load Video** nodes in
   - name Z–A
 - direct file deletion from the browser (single file, multi-select delete button, and whole-folder delete)
 - **Multi** only toggles multi-select mode; the **Delete** button next to it deletes the selected files (stays visible, greyed out when nothing is selected)
-- **Upload folder** and **Delete folder** live at the bottom of the folders sidebar
+- **Folder** dropdown can browse both the `input` and the `output` root, so a rendered image can be picked as input again (the node value becomes `"<file> [output]"`)
+- per-card **View** button (left of Delete) opens a **panel-sized preview**: the image fills the browser dialog and `‹` / `›` page through the current batch; the arrows sit outside the image, next to the panel edges, and `←` / `→` / `Esc` work too
+- **Upload folder**, **Copy path** and **Delete folder** sit at the bottom of the folders sidebar; *Copy path* copies the absolute path of the selected folder
+- write actions (upload / delete) are limited to the `input` root
 - after saving an edit in the **Mask Editor** or the **Painter**, the node keeps loading the edited image (annotated `"<file> [input]"` widget values are resolved the same way as the native Load Image node)
 - mixed aspect ratio thumbnail support
 - automatic node resizing for media previews
@@ -96,7 +99,7 @@ Replace the old folder, restart ComfyUI, and hard refresh the web UI.
 
 ## Release
 
-Current version: **1.0.1**
+Current version: **1.0.2**
 
 ## Suggested GitHub topics
 

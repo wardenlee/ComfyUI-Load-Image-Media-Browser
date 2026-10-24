@@ -70,6 +70,19 @@ function hasAnnotation(value) {
   return ANNOTATION_SUFFIX_RE.test(String(value || "").trim());
 }
 
+function annotationOf(value) {
+  const match = String(value || "").match(/\[(input|output|temp)\]\s*$/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+// Widget value for an item: files outside the input root carry the annotation
+// suffix understood by the native Load Image node ("<file> [output]").
+function itemValue(item) {
+  const rel = String(item?.relpath || "");
+  const root = item?.root || "input";
+  return root === "input" ? rel : `${rel} [${root}]`;
+}
+
 function splitRelpath(relpath) {
   const v = stripAnnotation(relpath).replace(/\\/g, "/");
   const m = v.match(/^(input|r\d+):/);
@@ -118,7 +131,7 @@ function updateWidgetChoicesForFolder(node, folder, data = currentData) {
   const widget = widgetForNode(node);
   if (!widget || !data) return;
   const items = listImagesForFolder(data, folder, node);
-  const values = items.map((item) => item.relpath);
+  const values = items.map((item) => itemValue(item));
   const currentValue = widget.value;
   widget.options = widget.options || {};
   if (!values.length) return;
@@ -147,7 +160,7 @@ function ensureStyles() {
   const style = document.createElement("style");
   style.textContent = `
     .tm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10000;display:flex;align-items:center;justify-content:center;font-family:inherit}
-    .tm-dialog{width:min(1180px,94vw);height:min(82vh,900px);background:var(--comfy-menu-bg, #1f1f1f);color:var(--input-text, #f2f2f2);border:1px solid var(--border-color, #444);border-radius:16px;display:flex;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.45)}
+    .tm-dialog{width:min(1180px,94vw);height:min(82vh,900px);background:var(--comfy-menu-bg, #1f1f1f);color:var(--input-text, #f2f2f2);border:1px solid var(--border-color, #444);border-radius:16px;display:flex;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.45);position:relative}
     .tm-sidebar{width:280px;border-right:1px solid var(--border-color, #444);display:flex;flex-direction:column;background:rgba(255,255,255,.02)}
     .tm-main{flex:1;display:flex;flex-direction:column;min-width:0}
     .tm-head{display:flex;gap:10px;align-items:center;padding:14px;border-bottom:1px solid var(--border-color, #444)}
@@ -157,7 +170,7 @@ function ensureStyles() {
     .tm-search{flex:1;min-width:180px;border:1px solid var(--border-color, #555);background:var(--comfy-input-bg, #2c2c2c);color:inherit;border-radius:10px;padding:8px 10px}
     .tm-folder-list{overflow:auto;padding:8px;flex:1;min-height:0}
     .tm-sidebar-footer{display:flex;gap:8px;padding:10px;border-top:1px solid var(--border-color, #444)}
-    .tm-sidebar-footer .tm-btn{flex:1;padding:6px 8px;font-size:12px;text-align:center}
+    .tm-sidebar-footer .tm-btn{flex:1 1 30%;padding:5px 4px;font-size:11px;line-height:1.2;text-align:center;white-space:normal}
     .tm-btn:disabled{opacity:.45;cursor:not-allowed}
     .tm-btn:disabled:hover{filter:none}
     .tm-root-select{width:calc(100% - 16px);margin:4px 8px 0;padding:8px 10px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:calc(100% - 16px)}
@@ -176,11 +189,22 @@ function ensureStyles() {
     .tm-meta{font-size:12px;opacity:.8;display:flex;justify-content:space-between;gap:8px}
     .tm-name{font-size:12px;line-height:1.35;word-break:break-word}
     .tm-empty{padding:20px;opacity:.75}
-    .tm-actions{display:flex;gap:8px;justify-content:flex-end}
+    .tm-actions{display:flex;gap:8px;justify-content:flex-start}
     .tm-danger{border-color:#8f3d3d}
     .tm-toggle.active{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.28)}
     .tm-toggle.inactive{opacity:.65}
     .tm-spacer{flex:1}
+    /* large preview: fills the whole dialog, nav arrows sit in the gutters next to the panel edges */
+    .tm-zoom{position:absolute;inset:0;z-index:6;background:rgba(8,8,8,.96);display:none;align-items:center;justify-content:center;padding:16px 84px}
+    .tm-zoom.open{display:flex}
+    .tm-zoom-media{width:100%;height:100%;display:flex;align-items:center;justify-content:center;min-width:0}
+    .tm-zoom-media img,.tm-zoom-media video{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;background:#000}
+    .tm-zoom-nav{position:absolute;top:50%;transform:translateY(-50%);width:48px;height:48px;padding:0;font-size:22px;line-height:1;border-radius:50%;z-index:2}
+    .tm-zoom-nav.prev{left:16px}
+    .tm-zoom-nav.next{right:16px}
+    .tm-zoom-bar{position:absolute;top:12px;right:16px;display:flex;gap:10px;align-items:center;z-index:2}
+    .tm-zoom-count{font-size:12px;opacity:.85}
+    .tm-zoom-close{width:34px;height:34px;padding:0;border-radius:50%}
   `;
   document.head.appendChild(style);
 }
@@ -200,6 +224,7 @@ function ensureDialog() {
         <div class="tm-folder-list"></div>
         <div class="tm-sidebar-footer">
           <button class="tm-btn tm-upload-folder" title="Upload an entire folder (subfolders preserved)">Upload folder</button>
+          <button class="tm-btn tm-copy-path" title="Copy the absolute path of the selected folder">Copy path</button>
           <button class="tm-btn tm-danger tm-folder-delete" title="Delete the selected folder and everything inside it">Delete folder</button>
         </div>
       </div>
@@ -223,6 +248,12 @@ function ensureDialog() {
         </div>
         <div class="tm-grid"></div>
       </div>
+      <div class="tm-zoom">
+        <div class="tm-zoom-media"></div>
+        <button class="tm-btn tm-zoom-nav prev" type="button" title="Previous">‹</button>
+        <button class="tm-btn tm-zoom-nav next" type="button" title="Next">›</button>
+        <div class="tm-zoom-bar"><span class="tm-zoom-count"></span><button class="tm-btn tm-zoom-close" type="button" title="Close">✕</button></div>
+      </div>
     </div>
   `;
 
@@ -236,11 +267,20 @@ function ensureDialog() {
   overlay.querySelector(".tm-multi").addEventListener("click", toggleMultiSelect);
   overlay.querySelector(".tm-delete").addEventListener("click", deleteSelected);
   overlay.querySelector(".tm-folder-delete").addEventListener("click", deleteCurrentFolder);
+  overlay.querySelector(".tm-copy-path").addEventListener("click", copyCurrentFolderPath);
+  overlay.querySelector(".tm-zoom-nav.prev").addEventListener("click", () => stepZoom(-1));
+  overlay.querySelector(".tm-zoom-nav.next").addEventListener("click", () => stepZoom(1));
+  overlay.querySelector(".tm-zoom-close").addEventListener("click", closeZoom);
+  for (const sel of [".tm-upload", ".tm-upload-folder"]) {
+    const btn = overlay.querySelector(sel);
+    if (btn) btn.dataset.tip = btn.title;
+  }
   enableDragDrop(overlay);
   overlay.querySelector(".tm-root-select").addEventListener("change", (event) => {
     currentRoot = event.target.value || "input";
     currentFolder = ".";
     rememberFolder(currentNode, currentFolder);
+    updateRootActions();
     renderFolders();
     renderGrid();
   });
@@ -275,11 +315,17 @@ function stopAutoRefresh() {
 }
 
 function onDialogKeydown(event) {
+  if (isZoomOpen()) {
+    if (event.key === "Escape") { closeZoom(); return; }
+    if (event.key === "ArrowLeft") { event.preventDefault?.(); stepZoom(-1); return; }
+    if (event.key === "ArrowRight") { event.preventDefault?.(); stepZoom(1); return; }
+  }
   if (event.key === "Escape") closeDialog();
 }
 
 function closeDialog() {
   stopAutoRefresh();
+  closeZoom();
   document.removeEventListener("keydown", onDialogKeydown);
   if (dialog) dialog.style.display = "none";
 }
@@ -458,7 +504,7 @@ function toggleMultiSelect() {
 function updateDeleteButton() {
   const btn = dialog?.querySelector(".tm-delete");
   if (!btn) return;
-  const count = multiSelect ? selectedSet.size : 0;
+  const count = multiSelect && (currentRoot || "input") === "input" ? selectedSet.size : 0;
   btn.disabled = count === 0;
   btn.textContent = count > 0 ? `Delete (${count})` : "Delete";
 }
@@ -466,7 +512,19 @@ function updateDeleteButton() {
 function updateFolderDeleteButton() {
   const btn = dialog?.querySelector(".tm-folder-delete");
   if (!btn) return;
-  btn.disabled = normalizeFolder(currentFolder) === ".";
+  btn.disabled = (currentRoot || "input") !== "input" || normalizeFolder(currentFolder) === ".";
+}
+
+function updateRootActions() {
+  const isInput = (currentRoot || "input") === "input";
+  for (const sel of [".tm-upload", ".tm-upload-folder"]) {
+    const btn = dialog?.querySelector(sel);
+    if (!btn) continue;
+    btn.disabled = !isInput;
+    btn.title = isInput ? (btn.dataset.tip || "Upload") : "Only available in the input root";
+  }
+  updateFolderDeleteButton();
+  updateDeleteButton();
 }
 
 async function deleteMany(relpaths) {
@@ -686,27 +744,30 @@ async function fitNodePreviewToMedia(node, relpath, explicitType = null) {
   }
 }
 
-async function setNodeMedia(node, relpath) {
+async function setNodeMedia(node, item) {
   const widget = widgetForNode(node);
   if (!widget) return;
-  const folder = folderFromRelpath(relpath);
+  const isItem = item && typeof item === "object";
+  const relpath = isItem ? item.relpath : String(item || "");
+  const value = isItem ? itemValue(item) : String(item || "");
+  const folder = isItem ? (item.folder || ".") : folderFromRelpath(relpath);
   rememberFolder(node, folder);
   updateWidgetChoicesForFolder(node, folder, currentData);
-  widget.value = relpath;
-  if (Array.isArray(widget.options?.values) && !widget.options.values.includes(relpath)) {
-    widget.options.values.unshift(relpath);
+  widget.value = value;
+  if (Array.isArray(widget.options?.values) && !widget.options.values.includes(value)) {
+    widget.options.values.unshift(value);
   }
-  await fitNodePreviewToMedia(node, relpath);
+  await fitNodePreviewToMedia(node, value);
   widget.callback?.(widget.value);
   node.setDirtyCanvas?.(true, true);
   closeDialog();
 }
 
-async function deleteImage(relpath) {
+async function deleteImage(relpath, root = "input") {
   const response = await api.fetchApi("/thumbnails-modern/delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ relpath }),
+    body: JSON.stringify({ relpath, root }),
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
@@ -744,10 +805,11 @@ function filteredImages() {
   return items;
 }
 
-function mediaUrl(relpath) {
+function mediaUrl(relpath, rootHint) {
   const { root, rel } = splitRelpath(relpath);
-  if (root !== "input") {
-    const params = new URLSearchParams({ root, relpath: rel });
+  const effectiveRoot = rootHint || annotationOf(relpath) || root;
+  if (effectiveRoot !== "input") {
+    const params = new URLSearchParams({ root: effectiveRoot, relpath: rel });
     return api.apiURL(`/thumbnails-modern/media?${params.toString()}`);
   }
   const normalized = String(rel || "").replace(/\\/g, "/");
@@ -821,9 +883,9 @@ function renderGrid() {
     if (showThumbs) {
       if (item.media_type === "video") {
         const autoplay = autoplayVideos ? "autoplay muted loop playsinline" : "controls muted playsinline";
-        mediaHtml = `<div class="tm-preview"><video loading="lazy" src="${mediaUrl(item.relpath)}" ${autoplay}></video><div class="tm-badge">VIDEO</div></div>`;
+        mediaHtml = `<div class="tm-preview"><video loading="lazy" src="${mediaUrl(item.relpath, item.root)}" ${autoplay}></video><div class="tm-badge">VIDEO</div></div>`;
       } else {
-        mediaHtml = `<div class="tm-preview"><img loading="lazy" src="${mediaUrl(item.relpath)}" alt="${escapedName}" onerror="this.dataset.error=1;this.title='Thumbnail could not be loaded';" /><span class="tm-selmark"${isSelected ? "" : " style=\"display:none\""}>✓</span></div>`;
+        mediaHtml = `<div class="tm-preview"><img loading="lazy" src="${mediaUrl(item.relpath, item.root)}" alt="${escapedName}" onerror="this.dataset.error=1;this.title='Thumbnail could not be loaded';" /><span class="tm-selmark"${isSelected ? "" : " style=\"display:none\""}>✓</span></div>`;
       }
     } else {
       mediaHtml = `<div class="tm-preview"><span class="tm-selmark"${isSelected ? "" : " style=\"display:none\""}>✓</span></div>`;
@@ -847,30 +909,154 @@ function renderGrid() {
         updateDeleteButton();
       });
     } else if (usableInNode) {
-      card.addEventListener("click", () => setNodeMedia(currentNode, item.relpath));
+      card.addEventListener("click", () => setNodeMedia(currentNode, item));
     }
 
-    if (canDelete && !multiSelect) {
+    if (!multiSelect) {
       const actions = document.createElement("div");
       actions.className = "tm-actions";
-      const del = document.createElement("button");
-      del.className = "tm-btn tm-danger";
-      del.textContent = "Delete";
-      del.addEventListener("click", async (event) => {
+      const view = document.createElement("button");
+      view.className = "tm-btn tm-view";
+      view.textContent = "View";
+      view.title = "Open the large preview";
+      view.addEventListener("click", (event) => {
         event.stopPropagation();
-        if (!confirm(`Delete file?\n${item.relpath}`)) return;
-        try {
-          await deleteImage(item.relpath);
-        } catch (err) {
-          alert(`Delete failed: ${err.message || err}`);
-        }
+        openZoom(item);
       });
-      actions.appendChild(del);
+      actions.appendChild(view);
+      if (canDelete && (item.root || "input") === "input") {
+        const del = document.createElement("button");
+        del.className = "tm-btn tm-danger";
+        del.textContent = "Delete";
+        del.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          if (!confirm(`Delete file?\n${item.relpath}`)) return;
+          try {
+            await deleteImage(item.relpath, item.root || "input");
+          } catch (err) {
+            alert(`Delete failed: ${err.message || err}`);
+          }
+        });
+        actions.appendChild(del);
+      }
       card.appendChild(actions);
     }
 
     grid.appendChild(card);
   }
+}
+
+// ---- Copy the absolute path of the selected folder (sidebar footer button) ----
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {}
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    const ok = document.execCommand && document.execCommand("copy");
+    area.remove();
+    return !!ok;
+  } catch {
+    return false;
+  }
+}
+
+function flashButtonLabel(btn, text, fallback) {
+  if (!btn) return;
+  if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+  btn.textContent = text;
+  setTimeout(() => {
+    btn.textContent = btn.dataset.label || fallback;
+  }, 1400);
+}
+
+async function copyCurrentFolderPath() {
+  const btn = dialog?.querySelector(".tm-copy-path");
+  const rootId = (currentRoot || "input").toLowerCase();
+  const folder = normalizeFolder(currentFolder);
+  try {
+    const params = new URLSearchParams({ root: rootId, folder: folder === "." ? "" : folder });
+    const response = await api.fetchApi(`/thumbnails-modern/folder_path?${params.toString()}`);
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (await copyTextToClipboard(data.path)) {
+      flashButtonLabel(btn, "Copied", "Copy path");
+    } else {
+      window.prompt("Copy the folder path:", data.path);
+    }
+  } catch (err) {
+    alert(`Copy path failed: ${err.message || err}`);
+  }
+}
+
+// ---- Large preview (panel-sized, arrows in the gutters) ----
+let zoomItems = [];
+let zoomIndex = 0;
+
+function renderZoom() {
+  const media = dialog?.querySelector(".tm-zoom-media");
+  if (!media) return;
+  const item = zoomItems[zoomIndex];
+  media.innerHTML = "";
+  if (!item) return;
+  const url = mediaUrl(item.relpath, item.root);
+  if (item.media_type === "video") {
+    const video = document.createElement("video");
+    video.src = url;
+    video.controls = true;
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    media.appendChild(video);
+  } else {
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = item.name || "";
+    media.appendChild(img);
+  }
+  const count = dialog?.querySelector(".tm-zoom-count");
+  if (count) count.textContent = `${zoomIndex + 1} / ${zoomItems.length}`;
+  const solo = zoomItems.length < 2;
+  for (const sel of [".tm-zoom-nav.prev", ".tm-zoom-nav.next"]) {
+    const nav = dialog?.querySelector(sel);
+    if (nav) nav.style.display = solo ? "none" : "";
+  }
+}
+
+function openZoom(item) {
+  zoomItems = filteredImages();
+  const wantedRoot = item?.root || "input";
+  const found = zoomItems.findIndex((entry) => entry.relpath === item?.relpath && (entry.root || "input") === wantedRoot);
+  if (found < 0 || !zoomItems.length) return;
+  zoomIndex = found;
+  dialog?.querySelector(".tm-zoom")?.classList.add("open");
+  renderZoom();
+}
+
+function closeZoom() {
+  dialog?.querySelector(".tm-zoom")?.classList.remove("open");
+  const media = dialog?.querySelector(".tm-zoom-media");
+  if (media) media.innerHTML = "";
+}
+
+function stepZoom(delta) {
+  if (!zoomItems.length) return;
+  zoomIndex = ((zoomIndex + delta) % zoomItems.length + zoomItems.length) % zoomItems.length;
+  renderZoom();
+}
+
+function isZoomOpen() {
+  return !!dialog?.querySelector(".tm-zoom.open");
 }
 
 async function openDialog(node, refresh = false) {
@@ -891,7 +1077,8 @@ async function openDialog(node, refresh = false) {
     opt.textContent = r.label;
     rootSelect.appendChild(opt);
   }
-  const widgetValueRoot = splitRelpath(widgetForNode(node)?.value || "").root;
+  const widgetValue = widgetForNode(node)?.value || "";
+  const widgetValueRoot = annotationOf(widgetValue) || splitRelpath(widgetValue).root;
   currentRoot = roots.some((r) => r.id === widgetValueRoot) ? widgetValueRoot : "input";
   rootSelect.value = currentRoot;
 
@@ -921,8 +1108,10 @@ async function openDialog(node, refresh = false) {
   updateDeleteButton();
   updateFolderDeleteButton();
   dialog.querySelector(".tm-search").value = "";
+  closeZoom();
   renderFolders();
   renderGrid();
+  updateRootActions();
   dialog.style.display = "flex";
   // Auto refresh while dialog is open (keeps new uploads visible without manual Refresh)
   stopAutoRefresh();
@@ -971,7 +1160,8 @@ async function refreshNodeFolderChoices(node, force = false) {
   try {
     const data = await fetchListing(force);
     const folder = getRememberedFolder(node);
-    const widgetRoot = splitRelpath(widgetForNode(node)?.value || "").root || "input";
+    const widgetValue = widgetForNode(node)?.value || "";
+    const widgetRoot = annotationOf(widgetValue) || splitRelpath(widgetValue).root || "input";
     const exists = (data?.folders || []).some((item) => item.path === folder && (!item.root || item.root === widgetRoot));
     const targetFolder = exists ? folder : folderFromRelpath(widgetForNode(node)?.value || ".") || ".";
     rememberFolder(node, targetFolder);

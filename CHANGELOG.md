@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.2
+
+### Added
+
+- **output root** in the media root dropdown: browse ComfyUI's `output` folder next to `input` and pick a rendered image as the input again (the node value becomes `"<file> [output]"`, which the native Load Image node understands)
+- per-card **View** button (left of Delete) opening a **panel-sized preview**: the image fills the browser dialog and `‹` / `›` page through the current batch; arrows sit in the gutters next to the panel edges, `←` / `→` and `Esc` work too
+- **Copy path** button in the sidebar footer between *Upload folder* and *Delete folder*: copies the absolute path of the folder selected in the sidebar
+
+### Changed
+
+- write actions (Upload, Upload folder, Delete, Delete folder) are limited to the `input` root; the `output` root is browse/select only
+- version 1.0.2
+
 ## 1.0.1
 
 ### Changed

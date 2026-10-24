@@ -16,7 +16,7 @@ import folder_paths
 from server import PromptServer
 import nodes
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 ALLOWED_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".jxl", ".apng", ".ico"
 }
@@ -85,58 +85,106 @@ def _is_supported_media(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in (ALLOWED_EXTENSIONS | VIDEO_EXTENSIONS)
 
 
-def _scan_input_tree(force: bool = False) -> Dict[str, object]:
-    root = _input_root()
+def _media_roots() -> List[Dict[str, str]]:
+    """Browse roots: the ComfyUI input folder plus the output folder.
+
+    Images in ``output`` are useful as inputs again (e.g. re-editing a render),
+    so the browser ships both roots; selecting an output file writes the
+    ``"<file> [output]"`` annotation that the native Load Image node understands.
+    """
+    roots = [{"id": "input", "label": "input", "dir": str(_input_root())}]
     try:
-        stamp = root.stat().st_mtime_ns
-    except FileNotFoundError:
-        stamp = time.time_ns()
+        out_dir = Path(folder_paths.get_output_directory()).resolve()
+    except Exception:
+        out_dir = None
+    if out_dir is not None and out_dir.is_dir() and out_dir != _input_root():
+        roots.append({"id": "output", "label": "output", "dir": str(out_dir)})
+    return roots
+
+
+def _root_dir(root_id: str) -> Path:
+    for root in _media_roots():
+        if root["id"] == root_id:
+            return Path(root["dir"])
+    raise ValueError(f"Unknown media root: {root_id}")
+
+
+def _scan_input_tree(force: bool = False) -> Dict[str, object]:
+    roots = _media_roots()
+    stamp_parts = []
+    for root in roots:
+        try:
+            stamp_parts.append((root["id"], Path(root["dir"]).stat().st_mtime_ns))
+        except FileNotFoundError:
+            stamp_parts.append((root["id"], 0))
+        except OSError:
+            stamp_parts.append((root["id"], -1))
+    stamp = tuple(stamp_parts)
 
     if not force and _CACHE["stamp"] == stamp and _CACHE["listing"] is not None:
         return _CACHE["listing"]  # type: ignore[return-value]
 
     images: List[Dict[str, object]] = []
-    folders: Dict[str, int] = {".": 0}
+    folders: Dict[Tuple[str, str], int] = {}
 
-    for file_path in sorted(root.rglob("*"), key=lambda p: str(p).lower()):
-        if not _is_supported_media(file_path):
+    for root in roots:
+        root_id = root["id"]
+        base = Path(root["dir"])
+        folders[(root_id, ".")] = 0
+        try:
+            files = sorted(base.rglob("*"), key=lambda p: str(p).lower())
+        except OSError:
             continue
-        rel = file_path.relative_to(root).as_posix()
-        parent = file_path.parent.relative_to(root).as_posix() if file_path.parent != root else "."
-        stat = file_path.stat()
-        mime = mimetypes.guess_type(file_path.name)[0] or ("video/*" if file_path.suffix.lower() in VIDEO_EXTENSIONS else "image/*")
-        media_type = "video" if file_path.suffix.lower() in VIDEO_EXTENSIONS else "image"
-        images.append(
-            {
-                "name": file_path.name,
-                "relpath": rel,
-                "folder": parent,
-                "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
-                "mime": mime,
-                "media_type": media_type,
-                "selectable": media_type == "image",
-            }
-        )
-        folders[parent] = folders.get(parent, 0) + 1
-        if parent != ".":
-            current = Path(parent)
-            while current != Path("."):
-                ancestor = current.parent.as_posix() if current.parent.as_posix() != "" else "."
-                folders.setdefault(ancestor, 0)
-                current = current.parent
+        for file_path in files:
+            if not _is_supported_media(file_path):
+                continue
+            try:
+                rel = file_path.relative_to(base).as_posix()
+                parent = file_path.parent.relative_to(base).as_posix() if file_path.parent != base else "."
+                stat = file_path.stat()
+            except (OSError, ValueError):
+                continue
+            mime = mimetypes.guess_type(file_path.name)[0] or ("video/*" if file_path.suffix.lower() in VIDEO_EXTENSIONS else "image/*")
+            media_type = "video" if file_path.suffix.lower() in VIDEO_EXTENSIONS else "image"
+            images.append(
+                {
+                    "name": file_path.name,
+                    "relpath": rel,
+                    "folder": parent,
+                    "root": root_id,
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "mime": mime,
+                    "media_type": media_type,
+                    "selectable": media_type == "image",
+                }
+            )
+            folders[(root_id, parent)] = folders.get((root_id, parent), 0) + 1
+            if parent != ".":
+                current = Path(parent)
+                while current != Path("."):
+                    ancestor = current.parent.as_posix() if current.parent.as_posix() != "" else "."
+                    folders.setdefault((root_id, ancestor), 0)
+                    current = current.parent
 
     folder_items = []
-    for folder in sorted(folders.keys(), key=lambda x: (x != ".", x.lower())):
+    for (root_id, folder) in sorted(folders.keys(), key=lambda item: (item[0] != "input", item[0], item[1] != ".", item[1].lower())):
         folder_items.append(
             {
                 "path": folder,
-                "label": "input" if folder == "." else folder,
-                "count": sum(1 for item in images if item["folder"] == folder),
+                "root": root_id,
+                "label": root_id if folder == "." else folder,
+                "count": sum(1 for item in images if item["root"] == root_id and item["folder"] == folder),
             }
         )
 
-    listing = {"version": VERSION, "root": root.as_posix(), "folders": folder_items, "images": images}
+    listing = {
+        "version": VERSION,
+        "root": _input_root().as_posix(),
+        "roots": [{"id": root["id"], "label": root["label"]} for root in roots],
+        "folders": folder_items,
+        "images": images,
+    }
     _CACHE["stamp"] = stamp
     _CACHE["listing"] = listing
     return listing
@@ -144,7 +192,7 @@ def _scan_input_tree(force: bool = False) -> Dict[str, object]:
 
 def _list_choices() -> List[str]:
     listing = _scan_input_tree()
-    values = [item["relpath"] for item in listing["images"]]
+    values = [item["relpath"] for item in listing["images"] if item.get("root", "input") == "input"]
     return values or [""]
 
 
@@ -256,12 +304,51 @@ async def thumbnails_modern_list(request):
     return web.json_response(_scan_input_tree(force=force))
 
 
+@PromptServer.instance.routes.get("/thumbnails-modern/media")
+async def thumbnails_modern_media(request):
+    root_id = (request.rel_url.query.get("root", "input") or "input").lower()
+    relpath = request.rel_url.query.get("relpath", "")
+    try:
+        base = _root_dir(root_id)
+        rel = _safe_rel_path(relpath)
+        target = (base / rel).resolve()
+        if base != target and base not in target.parents:
+            raise ValueError("Resolved path escapes the media root")
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
+    if not target.exists() or not target.is_file():
+        return web.json_response({"ok": False, "error": "File not found"}, status=404)
+    return web.FileResponse(target)
+
+
+@PromptServer.instance.routes.get("/thumbnails-modern/folder_path")
+async def thumbnails_modern_folder_path(request):
+    """Absolute path of the folder selected in the sidebar (for the Copy path button)."""
+    root_id = (request.rel_url.query.get("root", "input") or "input").lower()
+    folder = request.rel_url.query.get("folder", "") or ""
+    try:
+        base = _root_dir(root_id)
+        rel = _safe_rel_path(folder)
+        target = (base / rel).resolve()
+        if base != target and base not in target.parents:
+            raise ValueError("Resolved path escapes the media root")
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
+    if not target.exists() or not target.is_dir():
+        return web.json_response({"ok": False, "error": "Folder not found"}, status=404)
+    return web.json_response({"ok": True, "path": str(target)})
+
+
 @PromptServer.instance.routes.post("/thumbnails-modern/delete")
 async def thumbnails_modern_delete(request):
     try:
         payload = await request.json()
     except Exception:
         payload = {}
+
+    root_id = str((payload or {}).get("root", "input") or "input").lower()
+    if root_id != "input":
+        return web.json_response({"ok": False, "error": "Deleting is only supported in the input root"}, status=400)
 
     relpath = payload.get("relpath", "")
     try:
@@ -315,7 +402,12 @@ async def thumbnails_modern_delete_folder(request):
     except Exception:
         payload = {}
 
-    result = _delete_folder_tree((payload or {}).get("relpath", ""))
+    payload = payload or {}
+    root_id = str(payload.get("root", "input") or "input").lower()
+    if root_id != "input":
+        return web.json_response({"ok": False, "error": "Deleting folders is only supported in the input root"}, status=400)
+
+    result = _delete_folder_tree(payload.get("relpath", ""))
     status = 200
     if not result.get("ok"):
         status = 404 if result.get("error") == "Folder not found" else 400
