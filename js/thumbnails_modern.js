@@ -512,7 +512,12 @@ function updateDeleteButton() {
 function updateFolderDeleteButton() {
   const btn = dialog?.querySelector(".tm-folder-delete");
   if (!btn) return;
-  btn.disabled = (currentRoot || "input") !== "input" || normalizeFolder(currentFolder) === ".";
+  const isRoot = normalizeFolder(currentFolder) === ".";
+  btn.disabled = isRoot;
+  const rootId = currentRoot || "input";
+  btn.title = isRoot
+    ? "Select a folder first (the media root itself cannot be deleted)"
+    : `Delete the selected folder and everything inside it (${rootId})`;
 }
 
 function updateRootActions() {
@@ -557,10 +562,9 @@ async function deleteSelected() {
 async function deleteCurrentFolder() {
   const folder = normalizeFolder(currentFolder);
   if (folder === ".") return;
-  const count = (currentData?.images || []).filter(
-    (item) => item.folder === folder || String(item.folder || "").startsWith(folder + "/")
-  ).length;
-  const label = folder;
+  const rootId = (currentRoot || "input").toLowerCase();
+  const count = (currentData?.images || []).filter((item) => item.folder === folder || String(item.folder || "").startsWith(folder + "/")).length;
+  const label = rootId === "input" ? folder : `${rootId}/${folder}`;
   if (!confirm(`Delete folder "${label}"${count ? ` and all ${count} file(s) inside` : ""}?\nThis cannot be undone.`)) return;
 
   const btn = dialog?.querySelector(".tm-folder-delete");
@@ -569,7 +573,7 @@ async function deleteCurrentFolder() {
     const response = await api.fetchApi("/thumbnails-modern/delete_folder", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ relpath: folder }),
+      body: JSON.stringify({ relpath: folder, root: rootId }),
     });
     const payload = await response.json();
     if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
@@ -865,7 +869,7 @@ function renderGrid() {
   grid.style.setProperty("--tm-thumb-size", `${thumbSize}px`);
   grid.style.setProperty("--tm-cols", String(columns));
   grid.style.setProperty("--tm-fit", fitMode === "cover" ? "cover" : "contain");
-  grid.style.setProperty("--tm-preview-height", `${previewHeight}px`);
+  grid.style.setProperty("--tm-preview-height", `${previewHeight + 45}px`); // 卡片信息从 4 行减到 2 行, 省出的 45px 让给预览图
   grid.innerHTML = "";
 
   const images = filteredImages();
@@ -891,10 +895,9 @@ function renderGrid() {
       mediaHtml = `<div class="tm-preview"><span class="tm-selmark"${isSelected ? "" : " style=\"display:none\""}>✓</span></div>`;
     }
     const nameHtml = showNames ? `<div class="tm-name">${escapedName}</div>` : "";
-    const modified = item.mtime_ns ? new Date(Number(item.mtime_ns) / 1e6).toLocaleString() : "";
     const usableInNode = canSelectItem(item);
-    const usageLabel = usableInNode ? "Selectable" : (mode === "video" ? "Image preview only" : "Video preview only");
-    card.innerHTML = `${mediaHtml}${nameHtml}<div class="tm-meta"><span>${item.folder}</span><span>${Math.round(item.size / 1024)} KB</span></div><div class="tm-meta"><span>${modified}</span><span>${item.media_type === "video" ? "Video" : "Image"}</span></div><div class="tm-meta"><span>${usageLabel}</span><span></span></div>`;
+    // 只有两行信息：文件名 + 「文件夹 · 大小」（日期、图片/视频类型、Selectable 均已取消）
+    card.innerHTML = `${mediaHtml}${nameHtml}<div class="tm-meta"><span>${item.folder}</span><span>${Math.round(item.size / 1024)} KB</span></div>`;
     if (!usableInNode) card.classList.add("not-selectable");
 
     if (multiSelect) {

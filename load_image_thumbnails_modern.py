@@ -367,20 +367,23 @@ async def thumbnails_modern_delete(request):
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
 
-def _delete_folder_tree(relpath: str) -> Dict[str, object]:
-    """Delete a folder (recursively) that lives inside the ComfyUI input tree."""
+def _delete_folder_tree(relpath: str, root_id: str = "input") -> Dict[str, object]:
+    """Delete a folder (recursively) that lives inside one of the media roots."""
     name, _ = _split_annotation(relpath)
     try:
         rel = _safe_rel_path(name)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     if not rel:
-        return {"ok": False, "error": "Refusing to delete the input root"}
+        return {"ok": False, "error": "Refusing to delete the media root"}
 
-    root = _input_root()
+    try:
+        root = _root_dir(root_id)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     target = (root / rel).resolve()
     if target == root or root not in target.parents:
-        return {"ok": False, "error": "Folder is outside the input directory"}
+        return {"ok": False, "error": "Folder is outside the media root"}
     if not target.exists():
         return {"ok": False, "error": "Folder not found"}
     if target.is_symlink() or not target.is_dir():
@@ -390,7 +393,7 @@ def _delete_folder_tree(relpath: str) -> Dict[str, object]:
         files = sum(1 for path in target.rglob("*") if path.is_file())
         shutil.rmtree(target)
         _scan_input_tree(force=True)
-        return {"ok": True, "deleted": rel, "files": files}
+        return {"ok": True, "deleted": rel, "root": root_id, "files": files}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -404,10 +407,7 @@ async def thumbnails_modern_delete_folder(request):
 
     payload = payload or {}
     root_id = str(payload.get("root", "input") or "input").lower()
-    if root_id != "input":
-        return web.json_response({"ok": False, "error": "Deleting folders is only supported in the input root"}, status=400)
-
-    result = _delete_folder_tree(payload.get("relpath", ""))
+    result = _delete_folder_tree(payload.get("relpath", ""), root_id)
     status = 200
     if not result.get("ok"):
         status = 404 if result.get("error") == "Folder not found" else 400

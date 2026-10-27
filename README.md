@@ -34,7 +34,8 @@ It adds a media browser to the native **Load Image** and **Load Video** nodes in
 - **Folder** dropdown can browse both the `input` and the `output` root, so a rendered image can be picked as input again (the node value becomes `"<file> [output]"`)
 - per-card **View** button (left of Delete) opens a **panel-sized preview**: the image fills the browser dialog and `‹` / `›` page through the current batch; the arrows sit outside the image, next to the panel edges, and `←` / `→` / `Esc` work too
 - **Upload folder**, **Copy path** and **Delete folder** sit at the bottom of the folders sidebar; *Copy path* copies the absolute path of the selected folder
-- write actions (upload / delete) are limited to the `input` root
+- uploading and single-file deletion are limited to the `input` root; **Delete folder** also works for folders under `output` (the media root itself is always protected)
+- each card shows two info lines only — file name, then folder · size (no date, media type or "Selectable" line); the freed height goes to the preview image
 - after saving an edit in the **Mask Editor** or the **Painter**, the node keeps loading the edited image (annotated `"<file> [input]"` widget values are resolved the same way as the native Load Image node)
 - mixed aspect ratio thumbnail support
 - automatic node resizing for media previews
