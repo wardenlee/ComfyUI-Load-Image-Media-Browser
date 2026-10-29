@@ -86,11 +86,11 @@ def _is_supported_media(path: Path) -> bool:
 
 
 def _media_roots() -> List[Dict[str, str]]:
-    """Browse roots: the ComfyUI input folder plus the output folder.
+    """Browse roots: ComfyUI input, output, and an extra "输入" source folder.
 
-    Images in ``output`` are useful as inputs again (e.g. re-editing a render),
-    so the browser ships both roots; selecting an output file writes the
-    ``"<file> [output]"`` annotation that the native Load Image node understands.
+    The extra root (/tmp/code/input) is a plain media folder the user keeps
+    source images in; images there are browse-only (cut/paste them into the
+    ComfyUI input root to use them in a node).
     """
     roots = [{"id": "input", "label": "input", "dir": str(_input_root())}]
     try:
@@ -99,6 +99,17 @@ def _media_roots() -> List[Dict[str, str]]:
         out_dir = None
     if out_dir is not None and out_dir.is_dir() and out_dir != _input_root():
         roots.append({"id": "output", "label": "output", "dir": str(out_dir)})
+
+    code_dir = Path("/tmp/code/input")
+    try:
+        if not code_dir.is_dir() and os.name == "posix":
+            code_dir.mkdir(parents=True, exist_ok=True)
+        if code_dir.is_dir():
+            resolved = code_dir.resolve()
+            if resolved != _input_root() and (out_dir is None or resolved != out_dir):
+                roots.append({"id": "code_input", "label": "输入", "dir": str(resolved)})
+    except Exception:
+        pass
     return roots
 
 
@@ -168,12 +179,13 @@ def _scan_input_tree(force: bool = False) -> Dict[str, object]:
                     current = current.parent
 
     folder_items = []
+    root_labels = {root["id"]: root["label"] for root in roots}
     for (root_id, folder) in sorted(folders.keys(), key=lambda item: (item[0] != "input", item[0], item[1] != ".", item[1].lower())):
         folder_items.append(
             {
                 "path": folder,
                 "root": root_id,
-                "label": root_id if folder == "." else folder,
+                "label": root_labels.get(root_id, root_id) if folder == "." else folder,
                 "count": sum(1 for item in images if item["root"] == root_id and item["folder"] == folder),
             }
         )
@@ -365,6 +377,72 @@ async def thumbnails_modern_delete(request):
         return web.json_response({"ok": True, "deleted": relpath})
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
+def _unique_dest(dest: Path) -> Path:
+    if not dest.exists():
+        return dest
+    stem, suffix = dest.stem, dest.suffix
+    index = 1
+    while True:
+        candidate = dest.with_name(f"{stem}_{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _move_files(from_root: str, relpaths, to_root: str, to_folder: str) -> Dict[str, object]:
+    """Move files (cut/paste) inside or between the media roots."""
+    try:
+        src_root = _root_dir(from_root)
+        dst_root = _root_dir(to_root)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    folder_rel = "" if str(to_folder or "").strip() in ("", ".") else _safe_rel_path(to_folder)
+    dst_dir = dst_root if not folder_rel else (dst_root / folder_rel).resolve()
+    if dst_dir != dst_root and dst_root not in dst_dir.parents:
+        return {"ok": False, "error": "Target folder is outside the media root"}
+    if not dst_dir.is_dir():
+        return {"ok": False, "error": "Target folder not found"}
+
+    moved: List[Dict[str, str]] = []
+    failed: List[str] = []
+    for relpath in relpaths or []:
+        try:
+            rel = _safe_rel_path(relpath)
+            if not rel:
+                raise ValueError("Empty source path")
+            src = (src_root / rel).resolve()
+            if src_root != src and src_root not in src.parents:
+                raise ValueError("Source is outside the media root")
+            if not src.is_file():
+                raise ValueError("Source is not a file")
+            dest = _unique_dest(dst_dir / src.name)
+            shutil.move(str(src), str(dest))
+            moved.append({"from": rel, "to": dest.relative_to(dst_root).as_posix()})
+        except Exception as exc:
+            failed.append(f"{relpath}: {exc}")
+
+    if moved:
+        _scan_input_tree(force=True)
+    return {"ok": True, "moved": moved, "failed": failed}
+
+
+@PromptServer.instance.routes.post("/thumbnails-modern/move")
+async def thumbnails_modern_move(request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    payload = payload or {}
+    result = _move_files(
+        str(payload.get("from_root", "input") or "input").lower(),
+        payload.get("relpaths") or [],
+        str(payload.get("to_root", "input") or "input").lower(),
+        payload.get("to_folder", "") or "",
+    )
+    return web.json_response(result, status=200 if result.get("ok") else 400)
 
 
 def _delete_folder_tree(relpath: str, root_id: str = "input") -> Dict[str, object]:

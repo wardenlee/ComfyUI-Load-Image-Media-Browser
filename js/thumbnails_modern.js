@@ -27,6 +27,9 @@ let currentShowImages = true;
 let currentShowVideos = true;
 let multiSelect = false;
 const selectedSet = new Set();
+// cut/paste (move) state: [{root, relpath}]
+let cutBuffer = [];
+const cutSet = new Set();
 let refreshTimer = null;
 const REFRESH_INTERVAL_MS = 5000;
 const STORAGE_KEY_LAST_FOLDER = "thumbnailsModern.lastFolder";
@@ -122,26 +125,65 @@ function rememberFolder(node, folder) {
   } catch {}
 }
 
-function listImagesForFolder(data, folder, node = currentNode) {
+function listImagesForFolder(data, folder, node = currentNode, rootId = currentRoot) {
   const normalized = normalizeFolder(folder);
-  return (data?.images || []).filter((item) => item.folder === normalized && (!item.root || item.root === currentRoot) && canSelectItem(item, node));
+  return (data?.images || []).filter((item) => item.folder === normalized && (!item.root || item.root === rootId) && canSelectItem(item, node));
 }
 
-function updateWidgetChoicesForFolder(node, folder, data = currentData) {
+function updateWidgetChoicesForFolder(node, folder, data = currentData, opts = {}) {
+  const rootId = opts.root || currentRoot || "input";
+  // 自定义来源目录（如 /tmp/code/input）只用于浏览/剪切，不写进节点下拉选项
+  if (!["input", "output"].includes(rootId)) return;
   const widget = widgetForNode(node);
   if (!widget || !data) return;
-  const items = listImagesForFolder(data, folder, node);
+  const items = listImagesForFolder(data, folder, node, rootId);
   const values = items.map((item) => itemValue(item));
   const currentValue = widget.value;
+  const keepValue = typeof opts.keepValue === "string" && opts.keepValue ? opts.keepValue : "";
   widget.options = widget.options || {};
-  if (!values.length) return;
+  if (!values.length) {
+    if (keepValue) widget.options.values = [keepValue, ...(widget.options.values || [])];
+    return;
+  }
   // Keep annotated values ("<file> [input]", written by the mask editor and the
-  // painter after saving an edit) instead of replacing them with the first file,
-  // otherwise the node would silently keep loading the original image.
+  // painter after saving an edit) and freshly uploaded values instead of
+  // replacing them with the first file of the folder.
   const annotated = hasAnnotation(currentValue);
-  widget.options.values = annotated && !values.includes(currentValue) ? values.concat([currentValue]) : values;
-  if (!annotated && currentValue && !values.includes(currentValue)) {
-    widget.value = values[0];
+  const preserve = annotated || (keepValue && currentValue === keepValue);
+  if (preserve) {
+    widget.options.values = values.includes(currentValue) ? values : values.concat([currentValue]);
+  } else {
+    widget.options.values = values;
+    if (currentValue && !values.includes(currentValue)) {
+      widget.value = values[0];
+    }
+  }
+}
+
+// 原生上传/外部改值后：先把新值放进下拉选项（不覆盖），再强制刷新列表补齐
+function keepWidgetChoice(node, value) {
+  const widget = widgetForNode(node);
+  if (!widget || !value) return;
+  widget.options = widget.options || {};
+  const values = Array.isArray(widget.options.values) ? widget.options.values.slice() : [];
+  if (!values.includes(value)) widget.options.values = [value, ...values];
+}
+
+async function refreshChoicesAfterValueChange(node, value) {
+  try {
+    const valueRoot = annotationOf(value) || "input";
+    const plain = stripAnnotation(value);
+    updateWidgetChoicesForFolder(node, folderFromRelpath(value), currentData, { keepValue: value, root: valueRoot });
+    keepWidgetChoice(node, value);
+    // 新值还不在缓存里（刚上传/刚粘贴）才强制重扫，避免每次选择都重扫目录
+    const known = (currentData?.images || []).some((item) => item.relpath === plain && (item.root || "input") === valueRoot);
+    if (known) return;
+    const data = await fetchListing(true);
+    currentData = data;
+    updateWidgetChoicesForFolder(node, folderFromRelpath(value), data, { keepValue: value, root: valueRoot });
+    keepWidgetChoice(node, value);
+  } catch (err) {
+    console.warn("Media Browser: refresh after value change failed", err);
   }
 }
 
@@ -163,23 +205,25 @@ function ensureStyles() {
     .tm-dialog{width:min(1180px,94vw);height:min(82vh,900px);background:var(--comfy-menu-bg, #1f1f1f);color:var(--input-text, #f2f2f2);border:1px solid var(--border-color, #444);border-radius:16px;display:flex;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.45);position:relative}
     .tm-sidebar{width:280px;border-right:1px solid var(--border-color, #444);display:flex;flex-direction:column;background:rgba(255,255,255,.02)}
     .tm-main{flex:1;display:flex;flex-direction:column;min-width:0}
-    .tm-head{display:flex;gap:10px;align-items:center;padding:14px;border-bottom:1px solid var(--border-color, #444)}
-    .tm-title{font-size:16px;font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .tm-head{display:flex;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border-color, #444);flex-wrap:wrap}
     .tm-btn{border:1px solid var(--border-color, #555);background:var(--comfy-input-bg, #2c2c2c);color:inherit;border-radius:10px;padding:8px 12px;cursor:pointer}
     .tm-btn:hover{filter:brightness(1.08)}
-    .tm-search{flex:1;min-width:180px;border:1px solid var(--border-color, #555);background:var(--comfy-input-bg, #2c2c2c);color:inherit;border-radius:10px;padding:8px 10px}
+    .tm-search{width:100%;box-sizing:border-box;border:1px solid var(--border-color, #555);background:var(--comfy-input-bg, #2c2c2c);color:inherit;border-radius:10px;padding:8px 10px}
+    .tm-sidebar-top{display:flex;flex-direction:column;gap:8px;padding:10px 8px;border-bottom:1px solid var(--border-color, #444)}
     .tm-folder-list{overflow:auto;padding:8px;flex:1;min-height:0}
     .tm-sidebar-footer{display:flex;gap:8px;padding:10px;border-top:1px solid var(--border-color, #444)}
     .tm-sidebar-footer .tm-btn{flex:1 1 30%;padding:5px 4px;font-size:11px;line-height:1.2;text-align:center;white-space:normal}
     .tm-btn:disabled{opacity:.45;cursor:not-allowed}
     .tm-btn:disabled:hover{filter:none}
-    .tm-root-select{width:calc(100% - 16px);margin:4px 8px 0;padding:8px 10px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:calc(100% - 16px)}
+    .tm-root-select{width:100%;box-sizing:border-box;margin:0;padding:8px 10px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .tm-folder{display:flex;justify-content:space-between;gap:8px;padding:10px 12px;border-radius:10px;cursor:pointer}
     .tm-folder:hover,.tm-folder.active{background:rgba(255,255,255,.08)}
     .tm-grid{padding:14px;overflow:auto;display:grid;gap:12px;grid-template-columns:repeat(var(--tm-cols, 4), minmax(0,1fr))}
     .tm-card{display:flex;flex-direction:column;gap:8px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:10px;cursor:pointer;min-width:0}
     .tm-card:hover{background:rgba(255,255,255,.06)}
     .tm-card.tm-selected{border-color:#4a9eff;background:rgba(74,158,255,.10);box-shadow:0 0 0 1px rgba(74,158,255,.45)}
+    .tm-card.tm-current{outline:2px solid #f0b45a;outline-offset:1px}
+    .tm-card.tm-cut{opacity:.45;outline:1px dashed #d9a441;outline-offset:1px}
     .tm-selmark{position:absolute;top:8px;left:8px;width:24px;height:24px;border-radius:50%;background:#4a9eff;color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1;z-index:2}
     .tm-multi.active{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.28)}
     .tm-preview{position:relative;width:100%;height:var(--tm-preview-height, 160px);border-radius:10px;background:#111;overflow:hidden;display:flex;align-items:center;justify-content:center}
@@ -219,8 +263,10 @@ function ensureDialog() {
   overlay.innerHTML = `
     <div class="tm-dialog" role="dialog" aria-modal="true">
       <div class="tm-sidebar">
-        <div class="tm-head"><div class="tm-title">Folders</div></div>
-        <select class="tm-btn tm-root-select" title="Media root"></select>
+        <div class="tm-sidebar-top">
+          <select class="tm-btn tm-root-select" title="Media root"></select>
+          <input class="tm-search" type="search" placeholder="Search file or folder" />
+        </div>
         <div class="tm-folder-list"></div>
         <div class="tm-sidebar-footer">
           <button class="tm-btn tm-upload-folder" title="Upload an entire folder (subfolders preserved)">Upload folder</button>
@@ -230,8 +276,6 @@ function ensureDialog() {
       </div>
       <div class="tm-main">
         <div class="tm-head">
-          <div class="tm-title">Media Browser</div>
-          <input class="tm-search" type="search" placeholder="Search file or folder" />
           <button class="tm-btn tm-toggle tm-toggle-images active" type="button">Images</button>
           <button class="tm-btn tm-toggle tm-toggle-videos active" type="button">Videos</button>
           <select class="tm-btn tm-sort">
@@ -242,6 +286,8 @@ function ensureDialog() {
           </select>
           <button class="tm-btn tm-multi" title="Toggle multi-select mode (pick several files, then press Delete)">Multi</button>
           <button class="tm-btn tm-upload" title="Upload multiple files to the input folder">Upload</button>
+          <button class="tm-btn tm-cut" title="Cut the selected file(s), then open a target folder and press Paste">Cut</button>
+          <button class="tm-btn tm-paste" disabled title="Move the cut file(s) into the current folder">Paste</button>
           <button class="tm-btn tm-danger tm-delete" disabled title="Delete the selected files">Delete</button>
           <button class="tm-btn tm-refresh">Refresh</button>
           <button class="tm-btn tm-close">Close</button>
@@ -265,6 +311,8 @@ function ensureDialog() {
   overlay.querySelector(".tm-upload").addEventListener("click", triggerUpload);
   overlay.querySelector(".tm-upload-folder").addEventListener("click", uploadFolder);
   overlay.querySelector(".tm-multi").addEventListener("click", toggleMultiSelect);
+  overlay.querySelector(".tm-cut").addEventListener("click", cutFiles);
+  overlay.querySelector(".tm-paste").addEventListener("click", pasteCutFiles);
   overlay.querySelector(".tm-delete").addEventListener("click", deleteSelected);
   overlay.querySelector(".tm-folder-delete").addEventListener("click", deleteCurrentFolder);
   overlay.querySelector(".tm-copy-path").addEventListener("click", copyCurrentFolderPath);
@@ -304,6 +352,7 @@ function ensureDialog() {
   });
   document.body.appendChild(overlay);
   dialog = overlay;
+  updateCutButtons();
   return dialog;
 }
 
@@ -530,6 +579,77 @@ function updateRootActions() {
   }
   updateFolderDeleteButton();
   updateDeleteButton();
+  updateCutButtons();
+}
+
+// ---- Cut / paste (move files between folders / roots) ----
+function cutCandidates() {
+  const rootId = currentRoot || "input";
+  if (selectedSet.size) return [...selectedSet].map((relpath) => ({ root: rootId, relpath }));
+  const value = widgetForNode(currentNode)?.value || "";
+  const plain = stripAnnotation(value);
+  const valueRoot = annotationOf(value) || "input";
+  if (plain && valueRoot === rootId) return [{ root: rootId, relpath: plain }];
+  return [];
+}
+
+function updateCutButtons() {
+  const cut = dialog?.querySelector(".tm-cut");
+  const paste = dialog?.querySelector(".tm-paste");
+  if (cut) cut.textContent = cutBuffer.length ? `Cut (${cutBuffer.length})` : "Cut";
+  if (paste) {
+    paste.disabled = cutBuffer.length === 0;
+    paste.textContent = cutBuffer.length ? `Paste (${cutBuffer.length})` : "Paste";
+  }
+}
+
+function cutFiles() {
+  const targets = cutCandidates();
+  if (!targets.length) {
+    alert("先勾选要剪切的图片（Multi 模式），或先在节点里选中一张属于当前目录的图片。");
+    return;
+  }
+  cutBuffer = targets;
+  cutSet.clear();
+  for (const target of targets) cutSet.add(`${target.root}:${target.relpath}`);
+  updateCutButtons();
+  renderGrid();
+}
+
+async function pasteCutFiles() {
+  if (!cutBuffer.length) return;
+  const toRoot = currentRoot || "input";
+  const toFolder = normalizeFolder(currentFolder);
+  const label = `${toRoot}${toFolder === "." ? "" : "/" + toFolder}`;
+  if (!confirm(`Move ${cutBuffer.length} file(s) into "${label}"?`)) return;
+
+  const groups = new Map();
+  for (const item of cutBuffer) {
+    if (!groups.has(item.root)) groups.set(item.root, []);
+    groups.get(item.root).push(item.relpath);
+  }
+  let moved = 0;
+  const failed = [];
+  try {
+    for (const [fromRoot, relpaths] of groups) {
+      const response = await api.fetchApi("/thumbnails-modern/move", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from_root: fromRoot, relpaths, to_root: toRoot, to_folder: toFolder }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      moved += (payload.moved || []).length;
+      failed.push(...(payload.failed || []));
+    }
+    cutBuffer = [];
+    cutSet.clear();
+    updateCutButtons();
+    await refreshListingInPlace(true);
+    if (failed.length) alert(`Moved ${moved} file(s), ${failed.length} failed:\n${failed.join("\n")}`);
+  } catch (err) {
+    alert(`Paste failed: ${err.message || err}`);
+  }
 }
 
 async function deleteMany(relpaths) {
@@ -635,6 +755,9 @@ function triggerUpload() {
 }
 
 function canSelectItem(item, node = currentNode) {
+  // 自定义来源目录（/tmp/code/input 等）只用于浏览：先 Cut → 到 input 里 Paste 再用
+  const root = item?.root || "input";
+  if (root !== "input" && root !== "output") return false;
   const mode = mediaModeForNode(node);
   if (mode === "video") return item?.media_type === "video";
   return item?.media_type === "image" && item?.selectable !== false;
@@ -848,7 +971,6 @@ function renderFolders() {
 
 function renderGrid() {
   const grid = dialog.querySelector(".tm-grid");
-  const title = dialog.querySelector(".tm-main .tm-title");
   const showThumbs = getSettingValue(SETTINGS.thumbs, true);
   const showNames = getSettingValue(SETTINGS.names, true);
   const thumbSize = getSettingValue(SETTINGS.size, 120);
@@ -857,9 +979,9 @@ function renderGrid() {
   const fitMode = getSettingValue(SETTINGS.fit, "contain");
   const previewHeight = getSettingValue(SETTINGS.previewHeight, 160);
   const autoplayVideos = getSettingValue(SETTINGS.autoplayVideos, true);
-  const mode = mediaModeForNode(currentNode);
-  const rootLabel = (currentData?.roots || []).find((r) => r.id === currentRoot)?.label || currentRoot;
-  title.textContent = currentFolder === "." ? `Media Browser · ${rootLabel} (${mode} node)` : `Media Browser · ${rootLabel}/${currentFolder} (${mode} node)`;
+  const currentNodeValue = widgetForNode(currentNode)?.value || "";
+  const currentNodeRel = stripAnnotation(currentNodeValue);
+  const currentNodeRoot = annotationOf(currentNodeValue) || "input";
   const imagesToggle = dialog.querySelector(".tm-toggle-images");
   const videosToggle = dialog.querySelector(".tm-toggle-videos");
   if (imagesToggle) imagesToggle.className = `tm-btn tm-toggle tm-toggle-images ${currentShowImages ? "active" : "inactive"}`;
@@ -882,6 +1004,10 @@ function renderGrid() {
     const card = document.createElement("div");
     const isSelected = selectedSet.has(item.relpath);
     card.className = "tm-card" + (isSelected ? " tm-selected" : "");
+    if (currentNodeRel && item.relpath === currentNodeRel && (item.root || "input") === currentNodeRoot) {
+      card.classList.add("tm-current");
+    }
+    if (cutSet.has(`${item.root || "input"}:${item.relpath}`)) card.classList.add("tm-cut");
     const escapedName = item.name.replace(/[<>&"]/g, (m) => ({"<":"&lt;",">":"&gt;","&":"&amp;","\"":"&quot;"}[m]));
     let mediaHtml = "";
     if (showThumbs) {
@@ -1071,6 +1197,18 @@ async function openDialog(node, refresh = false) {
   currentNode = node;
   currentData = await fetchListing(refresh);
 
+  // 最近上传/编辑的文件可能还没进缓存：节点当前值若不在列表里，强制重扫一次
+  const nodeValue = widgetForNode(node)?.value || "";
+  const nodePlain = stripAnnotation(nodeValue);
+  const nodeRoot = annotationOf(nodeValue) || splitRelpath(nodeValue).root || "input";
+  if (nodePlain && !(currentData?.images || []).some((item) => item.relpath === nodePlain && (item.root || "input") === nodeRoot)) {
+    try {
+      currentData = await fetchListing(true);
+    } catch (err) {
+      console.warn("Media Browser: forced refresh failed", err);
+    }
+  }
+
   const rootSelect = dialog.querySelector(".tm-root-select");
   const roots = currentData?.roots || [{ id: "input", label: "input" }];
   rootSelect.innerHTML = "";
@@ -1115,6 +1253,8 @@ async function openDialog(node, refresh = false) {
   renderFolders();
   renderGrid();
   updateRootActions();
+  const currentCard = dialog.querySelector(".tm-grid .tm-card.tm-current");
+  if (currentCard && typeof currentCard.scrollIntoView === "function") currentCard.scrollIntoView({ block: "nearest" });
   dialog.style.display = "flex";
   // Auto refresh while dialog is open (keeps new uploads visible without manual Refresh)
   stopAutoRefresh();
@@ -1142,7 +1282,10 @@ function addBrowserButton(node) {
     imageWidget.callback = function (value, ...args) {
       const folder = folderFromRelpath(value);
       rememberFolder(node, folder);
-      updateWidgetChoicesForFolder(node, folder, currentData);
+      // 原生「选择文件上传」/其他扩展改值：先把新值保住并补进下拉，再强制刷新列表，
+      // 避免用旧缓存把它覆盖成文件夹里的第一张（否则上传完看不到最新文件）。
+      keepWidgetChoice(node, value);
+      refreshChoicesAfterValueChange(node, value);
       fitNodePreviewToMedia(node, value, mediaModeForNode(node));
       return typeof originalCallback === "function" ? originalCallback.call(this, value, ...args) : undefined;
     };
@@ -1161,14 +1304,24 @@ function addBrowserButton(node) {
 
 async function refreshNodeFolderChoices(node, force = false) {
   try {
-    const data = await fetchListing(force);
-    const folder = getRememberedFolder(node);
+    let data = await fetchListing(force);
     const widgetValue = widgetForNode(node)?.value || "";
     const widgetRoot = annotationOf(widgetValue) || splitRelpath(widgetValue).root || "input";
+    // 当前值（刚上传/刚选中的文件）若不在缓存列表里，先强制重扫，避免被下拉重建时改掉
+    const plain = stripAnnotation(widgetValue);
+    const known = (data?.images || []).some((item) => item.relpath === plain && (item.root || "input") === widgetRoot);
+    if (plain && !known) {
+      try {
+        data = await fetchListing(true);
+      } catch (err) {
+        console.warn("Thumbnails Modern: forced refresh failed", err);
+      }
+    }
+    const folder = getRememberedFolder(node);
     const exists = (data?.folders || []).some((item) => item.path === folder && (!item.root || item.root === widgetRoot));
-    const targetFolder = exists ? folder : folderFromRelpath(widgetForNode(node)?.value || ".") || ".";
+    const targetFolder = exists ? folder : folderFromRelpath(widgetValue || ".") || ".";
     rememberFolder(node, targetFolder);
-    updateWidgetChoicesForFolder(node, targetFolder, data);
+    updateWidgetChoicesForFolder(node, targetFolder, data, { keepValue: widgetValue, root: widgetRoot });
     const currentValue = widgetForNode(node)?.value;
     if (currentValue) fitNodePreviewToMedia(node, currentValue, mediaModeForNode(node));
   } catch (err) {
