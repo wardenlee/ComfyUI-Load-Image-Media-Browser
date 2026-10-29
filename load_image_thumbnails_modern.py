@@ -351,6 +351,34 @@ async def thumbnails_modern_folder_path(request):
     return web.json_response({"ok": True, "path": str(target)})
 
 
+WRITABLE_ROOTS = ("input", "code_input")
+
+
+def _delete_file(relpath: str, root_id: str = "input") -> Dict[str, object]:
+    """Delete one file inside a writable root (input or 输入)."""
+    if root_id not in WRITABLE_ROOTS:
+        return {"ok": False, "error": "Deleting is only supported in the input root and the 输入 folder"}
+    try:
+        base = _root_dir(root_id)
+        rel = _safe_rel_path(_split_annotation(relpath)[0])
+        if not rel:
+            raise ValueError("Empty path")
+        target = (base / rel).resolve()
+        if base != target and base not in target.parents:
+            raise ValueError("Resolved path escapes the media root")
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    if not target.exists() or not target.is_file():
+        return {"ok": False, "error": "File not found"}
+    try:
+        target.unlink()
+        _scan_input_tree(force=True)
+        return {"ok": True, "deleted": rel}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @PromptServer.instance.routes.post("/thumbnails-modern/delete")
 async def thumbnails_modern_delete(request):
     try:
@@ -358,25 +386,70 @@ async def thumbnails_modern_delete(request):
     except Exception:
         payload = {}
 
-    root_id = str((payload or {}).get("root", "input") or "input").lower()
-    if root_id != "input":
-        return web.json_response({"ok": False, "error": "Deleting is only supported in the input root"}, status=400)
+    payload = payload or {}
+    root_id = str(payload.get("root", "input") or "input").lower()
+    result = _delete_file(payload.get("relpath", ""), root_id)
+    if result.get("ok"):
+        return web.json_response(result)
+    status = 404 if result.get("error") == "File not found" else 400
+    return web.json_response(result, status=status)
 
-    relpath = payload.get("relpath", "")
+
+def _save_upload(root_id: str, subfolder: str, filename: str, data: bytes) -> Dict[str, object]:
+    """Write one uploaded file into a writable root (input or 输入)."""
+    if root_id not in WRITABLE_ROOTS:
+        return {"ok": False, "error": "Uploads are only supported in the input root and the 输入 folder"}
+    name = os.path.basename(str(filename or "").replace("\\", "/"))
+    if not name or name in (".", ".."):
+        return {"ok": False, "error": "Invalid file name"}
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in (ALLOWED_EXTENSIONS | VIDEO_EXTENSIONS):
+        return {"ok": False, "error": f"Unsupported file type: {ext}"}
     try:
-        target = _resolve_input_file(relpath)
-    except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc)}, status=400)
-
-    if not target.exists() or not target.is_file():
-        return web.json_response({"ok": False, "error": "File not found"}, status=404)
-
-    try:
-        target.unlink()
+        base = _root_dir(root_id)
+        rel_dir = "" if str(subfolder or "").strip() in ("", ".") else _safe_rel_path(subfolder)
+        target_dir = base if not rel_dir else (base / rel_dir).resolve()
+        if target_dir != base and base not in target_dir.parents:
+            raise ValueError("Target folder is outside the media root")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        dest = target_dir / name
+        if dest.exists():
+            return {"ok": True, "name": name, "subfolder": rel_dir, "skipped": True}
+        dest.write_bytes(data)
         _scan_input_tree(force=True)
-        return web.json_response({"ok": True, "deleted": relpath})
+        return {"ok": True, "name": name, "subfolder": rel_dir}
     except Exception as exc:
-        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        return {"ok": False, "error": str(exc)}
+
+
+@PromptServer.instance.routes.post("/thumbnails-modern/upload")
+async def thumbnails_modern_upload(request):
+    root_id = str(request.rel_url.query.get("root", "input") or "input").lower()
+    subfolder = request.rel_url.query.get("subfolder", "") or ""
+    try:
+        reader = await request.multipart()
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": f"multipart required: {exc}"}, status=400)
+
+    results = []
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if part.name != "image":
+            await part.release()
+            continue
+        data = await part.read()
+        results.append(_save_upload(root_id, subfolder, part.filename or "", data))
+
+    if not results:
+        return web.json_response({"ok": False, "error": "No file uploaded"}, status=400)
+    payload = dict(results[0])
+    if len(results) > 1:
+        payload["results"] = results
+    if not all(item.get("ok") for item in results):
+        payload["ok"] = False
+    return web.json_response(payload, status=200 if payload.get("ok") else 400)
 
 
 def _unique_dest(dest: Path) -> Path:

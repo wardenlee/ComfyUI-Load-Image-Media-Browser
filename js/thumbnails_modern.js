@@ -32,6 +32,8 @@ let cutBuffer = [];
 const cutSet = new Set();
 let refreshTimer = null;
 const REFRESH_INTERVAL_MS = 5000;
+// 可写根：ComfyUI input 与左侧「输入」(/tmp/code/input)；output 保持只读
+const WRITE_ROOTS = ["input", "code_input"];
 const STORAGE_KEY_LAST_FOLDER = "thumbnailsModern.lastFolder";
 
 function getSettingValue(id, fallback) {
@@ -390,6 +392,8 @@ async function fetchListing(refresh = false) {
 const UPLOAD_ACCEPT = ".png,.jpg,.jpeg,.webp,.gif,.bmp,.mp4,.webm,.mov,.m4v,.mkv,.avi";
 
 async function uploadOneFile(file, subfolder, idx, total, progressBtn) {
+  const rootId = currentRoot || "input";
+  const ownUpload = rootId !== "input";
   const formData = new FormData();
   formData.append("image", file);
   formData.append("type", "input");
@@ -397,9 +401,20 @@ async function uploadOneFile(file, subfolder, idx, total, progressBtn) {
   formData.append("overwrite", "false");
   if (progressBtn) progressBtn.textContent = total > 1 ? `Uploading ${idx + 1}/${total}` : "Uploading…";
   try {
-    const response = await api.fetchApi("/upload/image", { method: "POST", body: formData });
+    let response;
+    if (ownUpload) {
+      const qs = new URLSearchParams({ root: rootId, subfolder: subfolder || "" });
+      response = await api.fetchApi(`/thumbnails-modern/upload?${qs.toString()}`, { method: "POST", body: formData });
+    } else {
+      response = await api.fetchApi("/upload/image", { method: "POST", body: formData });
+    }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
+    if (ownUpload) {
+      if (data && data.skipped) return { skipped: true, name: file.name };
+      if (!data || !data.ok) throw new Error((data && data.error) || "upload failed");
+      return { ok: true, name: file.name };
+    }
     const savedName = (data && data.name) || file.name;
     if (savedName !== file.name) {
       // ComfyUI auto-renamed the file (e.g. "x (1).png") because one with the same
@@ -553,7 +568,7 @@ function toggleMultiSelect() {
 function updateDeleteButton() {
   const btn = dialog?.querySelector(".tm-delete");
   if (!btn) return;
-  const count = multiSelect && (currentRoot || "input") === "input" ? selectedSet.size : 0;
+  const count = multiSelect && WRITE_ROOTS.includes((currentRoot || "input")) ? selectedSet.size : 0;
   btn.disabled = count === 0;
   btn.textContent = count > 0 ? `Delete (${count})` : "Delete";
 }
@@ -570,12 +585,12 @@ function updateFolderDeleteButton() {
 }
 
 function updateRootActions() {
-  const isInput = (currentRoot || "input") === "input";
+  const isWritable = WRITE_ROOTS.includes((currentRoot || "input"));
   for (const sel of [".tm-upload", ".tm-upload-folder"]) {
     const btn = dialog?.querySelector(sel);
     if (!btn) continue;
-    btn.disabled = !isInput;
-    btn.title = isInput ? (btn.dataset.tip || "Upload") : "Only available in the input root";
+    btn.disabled = !isWritable;
+    btn.title = isWritable ? (btn.dataset.tip || "Upload") : "Only available in the input / 输入 roots";
   }
   updateFolderDeleteButton();
   updateDeleteButton();
@@ -652,12 +667,12 @@ async function pasteCutFiles() {
   }
 }
 
-async function deleteMany(relpaths) {
+async function deleteMany(relpaths, root = "input") {
   const ok = [];
   const failed = [];
   for (const relpath of relpaths) {
     try {
-      await deleteImage(relpath);
+      await deleteImage(relpath, root);
       ok.push(relpath);
     } catch (err) {
       failed.push(`${relpath} (${err.message || err})`);
@@ -668,9 +683,10 @@ async function deleteMany(relpaths) {
 
 async function deleteSelected() {
   if (!selectedSet.size) return;
+  const rootId = currentRoot || "input";
   const targets = Array.from(selectedSet);
   if (!confirm(`Delete ${targets.length} selected file(s)?\n${targets.join("\n")}`)) return;
-  const { ok, failed } = await deleteMany(targets);
+  const { ok, failed } = await deleteMany(targets, rootId);
   for (const rel of ok) selectedSet.delete(rel);
   updateDeleteButton();
   await refreshListingInPlace(true);
@@ -900,7 +916,7 @@ async function deleteImage(relpath, root = "input") {
   if (!response.ok || !payload.ok) {
     throw new Error(payload.error || `HTTP ${response.status}`);
   }
-  currentData.images = currentData.images.filter((item) => item.relpath !== relpath);
+  currentData.images = currentData.images.filter((item) => !(item.relpath === relpath && (item.root || "input") === root));
   renderFolders();
   renderGrid();
 }
@@ -1053,7 +1069,7 @@ function renderGrid() {
         openZoom(item);
       });
       actions.appendChild(view);
-      if (canDelete && (item.root || "input") === "input") {
+      if (canDelete && WRITE_ROOTS.includes(item.root || "input")) {
         const del = document.createElement("button");
         del.className = "tm-btn tm-danger";
         del.textContent = "Delete";
