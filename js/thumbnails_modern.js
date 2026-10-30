@@ -35,6 +35,8 @@ const REFRESH_INTERVAL_MS = 5000;
 // 可写根：ComfyUI input 与左侧「输入」(/tmp/code/input)；output 保持只读
 const WRITE_ROOTS = ["input", "code_input"];
 const STORAGE_KEY_LAST_FOLDER = "thumbnailsModern.lastFolder";
+const STORAGE_KEY_LAST_ROOT = "thumbnailsModern.lastRoot";
+const DEFAULT_ROOT_ID = "code_input"; // 默认显示「输入」(/tmp/code/input)
 
 function getSettingValue(id, fallback) {
   try {
@@ -123,6 +125,28 @@ function rememberFolder(node, folder) {
   }
   try {
     localStorage.setItem(STORAGE_KEY_LAST_FOLDER, normalized);
+  } catch {}
+}
+
+// ---- 记住「最近一次浏览的根目录」（默认「输入」） ----
+function getRememberedRoot(node) {
+  const nodeRoot = node?.properties?.tmCurrentRoot;
+  if (typeof nodeRoot === "string" && nodeRoot) return nodeRoot;
+  try {
+    return localStorage.getItem(STORAGE_KEY_LAST_ROOT) || "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberRoot(node, rootId) {
+  if (!rootId) return;
+  if (node) {
+    node.properties = node.properties || {};
+    node.properties.tmCurrentRoot = rootId;
+  }
+  try {
+    localStorage.setItem(STORAGE_KEY_LAST_ROOT, rootId);
   } catch {}
 }
 
@@ -326,6 +350,7 @@ function ensureDialog() {
   overlay.querySelector(".tm-root-select").addEventListener("change", (event) => {
     currentRoot = event.target.value || "input";
     currentFolder = ".";
+    rememberRoot(currentNode, currentRoot);
     rememberFolder(currentNode, currentFolder);
     updateRootActions();
     renderFolders();
@@ -1232,8 +1257,14 @@ async function openDialog(node, refresh = false) {
   }
   const widgetValue = widgetForNode(node)?.value || "";
   const widgetValueRoot = annotationOf(widgetValue) || splitRelpath(widgetValue).root;
-  currentRoot = roots.some((r) => r.id === widgetValueRoot) ? widgetValueRoot : "input";
+  // 首次默认「输入」；之后每次进入面板都回到上一次浏览的根目录
+  const rememberedRoot = getRememberedRoot(node);
+  const preferredRoot = rememberedRoot || DEFAULT_ROOT_ID;
+  currentRoot = roots.some((r) => r.id === preferredRoot)
+    ? preferredRoot
+    : (roots.some((r) => r.id === widgetValueRoot) ? widgetValueRoot : roots[0].id);
   rootSelect.value = currentRoot;
+  rememberRoot(node, currentRoot);
 
   // Important: keep the last browsed folder when reopening the browser.
   // Only fall back to the image value's folder when the node has not remembered one yet.
