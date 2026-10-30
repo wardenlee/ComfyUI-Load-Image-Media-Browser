@@ -226,6 +226,7 @@ function ensureStyles() {
   style.textContent = `
     .tm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10000;display:flex;align-items:center;justify-content:center;font-family:inherit}
     .tm-dialog{width:min(1180px,94vw);height:min(82vh,900px);background:var(--comfy-menu-bg, #1f1f1f);color:var(--input-text, #f2f2f2);border:1px solid var(--border-color, #444);border-radius:16px;display:flex;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.45);position:relative}
+    .tm-dialog.tm-dragover{border-color:#4a9eff;box-shadow:0 0 0 2px rgba(74,158,255,.55),0 24px 80px rgba(0,0,0,.45)}
     .tm-sidebar{width:280px;border-right:1px solid var(--border-color, #444);display:flex;flex-direction:column;background:rgba(255,255,255,.02)}
     .tm-main{flex:1;display:flex;flex-direction:column;min-width:0}
     .tm-head{display:flex;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border-color, #444);flex-wrap:wrap}
@@ -463,17 +464,20 @@ async function uploadOneFile(file, subfolder, idx, total, progressBtn) {
   }
 }
 
-async function uploadFiles(fileList) {
-  const files = Array.from(fileList || []);
-  if (!files.length) return;
-  const btn = dialog?.querySelector(".tm-upload");
+// ---- 上传：按「相对路径」批量写入当前根（文件、文件夹、拖拽共用） ----
+async function uploadFileEntries(picked, buttonSelector = ".tm-upload") {
+  const total = picked.length;
+  if (!total) return;
+  const btn = dialog?.querySelector(buttonSelector);
   const originalText = btn ? btn.textContent : "Upload";
   let okCount = 0;
   let failCount = 0;
   let skipCount = 0;
-  for (let i = 0; i < files.length; i++) {
-    const subfolder = currentFolder === "." ? "" : currentFolder;
-    const result = await uploadOneFile(files[i], subfolder, i, files.length, btn);
+  for (let i = 0; i < total; i++) {
+    const { rel, file } = picked[i];
+    const relDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+    const subfolder = currentFolder === "." ? relDir : [currentFolder, relDir].filter(Boolean).join("/");
+    const result = await uploadOneFile(file, subfolder, i, total, btn);
     if (result.ok) okCount++;
     else if (result.skipped) skipCount++;
     else failCount++;
@@ -481,6 +485,12 @@ async function uploadFiles(fileList) {
   if (btn) btn.textContent = originalText;
   alert(`Upload finished: ${okCount} ok, ${skipCount} skipped (already exists), ${failCount} failed`);
   if (okCount > 0) await refreshListingInPlace(true);
+}
+
+async function uploadFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  await uploadFileEntries(files.map((file) => ({ rel: file.name, file })), ".tm-upload");
 }
 
 // ---- Folder upload: File System Access API (preserves subfolder tree), fallback webkitdirectory ----
@@ -535,45 +545,111 @@ async function uploadFolder() {
     alert("No supported media files found in the selected folder.");
     return;
   }
-  const btn = dialog?.querySelector(".tm-upload-folder");
-  const originalText = btn ? btn.textContent : "Folder";
-  let okCount = 0;
-  let failCount = 0;
-  let skipCount = 0;
-  for (let i = 0; i < picked.length; i++) {
-    const { rel, file } = picked[i];
-    const relDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
-    const subfolder = currentFolder === "." ? relDir : [currentFolder, relDir].filter(Boolean).join("/");
-    const result = await uploadOneFile(file, subfolder, i, picked.length, btn);
-    if (result.ok) okCount++;
-    else if (result.skipped) skipCount++;
-    else failCount++;
-  }
-  if (btn) btn.textContent = originalText;
-  alert(`Folder upload finished: ${okCount} ok, ${skipCount} skipped (already exists), ${failCount} failed`);
-  if (okCount > 0) await refreshListingInPlace(true);
+  await uploadFileEntries(picked, ".tm-upload-folder");
 }
 
-// ---- Drag & drop multiple files onto the dialog ----
+// ---- Drag & drop files / folders onto the dialog ----
+function entryAsFile(entry) {
+  return new Promise((resolve, reject) => entry.file(resolve, reject));
+}
+
+function readAllEntries(reader) {
+  return new Promise((resolve, reject) => {
+    const out = [];
+    const next = () => {
+      reader.readEntries((batch) => {
+        if (!batch.length) return resolve(out);
+        out.push(...batch);
+        next();
+      }, reject);
+    };
+    next();
+  });
+}
+
+async function walkDroppedEntry(entry, prefix, out) {
+  if (!entry) return;
+  if (entry.isFile) {
+    try {
+      const file = await entryAsFile(entry);
+      out.push({ rel: prefix ? `${prefix}/${entry.name}` : entry.name, file });
+    } catch (err) {
+      console.warn("Media Browser: dropped file unreadable:", entry.name, err);
+    }
+    return;
+  }
+  if (entry.isDirectory) {
+    try {
+      const reader = entry.createReader();
+      const children = await readAllEntries(reader);
+      const nextPrefix = prefix ? `${prefix}/${entry.name}` : entry.name;
+      for (const child of children) await walkDroppedEntry(child, nextPrefix, out);
+    } catch (err) {
+      console.warn("Media Browser: dropped folder unreadable:", entry.name, err);
+    }
+  }
+}
+
 function enableDragDrop(overlayEl) {
-  const onDragOver = (event) => {
-    event.preventDefault();
-    event.stopPropagation();
+  let dragDepth = 0;
+  const setDragActive = (on) => {
+    const dialogEl = overlayEl.querySelector(".tm-dialog");
+    if (dialogEl) dialogEl.classList.toggle("tm-dragover", on);
   };
-  const onDrop = (event) => {
+  const onDragOver = (event) => {
+    if (!overlayEl.querySelector(".tm-dialog")) return;
     event.preventDefault();
     event.stopPropagation();
-    const files = Array.from(event.dataTransfer?.files || []);
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  };
+  const onDragEnter = (event) => {
+    if (!overlayEl.querySelector(".tm-dialog")) return;
+    event.preventDefault();
+    dragDepth += 1;
+    setDragActive(true);
+  };
+  const onDragLeave = () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) setDragActive(false);
+  };
+  const onDrop = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepth = 0;
+    setDragActive(false);
+    if (!WRITE_ROOTS.includes(currentRoot || "input")) {
+      alert("当前根目录是只读的（output），请先切到 input 或 输入 再拖入。");
+      return;
+    }
+    const dt = event.dataTransfer;
+    if (!dt) return;
     const allowed = UPLOAD_ACCEPT.split(",");
-    const filtered = files.filter((f) => {
-      const dot = f.name.lastIndexOf(".");
+    const entries = [];
+    for (const item of Array.from(dt.items || [])) {
+      if (item.kind !== "file") continue;
+      const entry = item.webkitGetAsEntry?.();
+      if (entry) entries.push(entry);
+    }
+    let picked = [];
+    if (entries.length) {
+      for (const entry of entries) await walkDroppedEntry(entry, "", picked);
+    } else {
+      picked = Array.from(dt.files || []).map((file) => ({ rel: file.name, file }));
+    }
+    picked = picked.filter(({ rel }) => {
+      const dot = rel.lastIndexOf(".");
       if (dot < 0) return false;
-      return allowed.includes(f.name.slice(dot).toLowerCase());
+      return allowed.includes(rel.slice(dot).toLowerCase());
     });
-    if (filtered.length) uploadFiles(filtered);
-    else if (files.length) alert("No supported media files dropped.");
+    if (!picked.length) {
+      alert("No supported media files dropped.");
+      return;
+    }
+    await uploadFileEntries(picked, ".tm-upload");
   };
   overlayEl.addEventListener("dragover", onDragOver);
+  overlayEl.addEventListener("dragenter", onDragEnter);
+  overlayEl.addEventListener("dragleave", onDragLeave);
   overlayEl.addEventListener("drop", onDrop);
 }
 
