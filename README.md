@@ -30,6 +30,12 @@ It adds a media browser to the native **Load Image** and **Load Video** nodes in
   - name A–Z
   - name Z–A
 - direct file deletion from the browser (single file, multi-select delete button, and whole-folder delete)
+- uploads: **Upload** (files), **Upload folder** (whole tree, subfolders preserved) and **drag & drop** of files *or folders* onto the panel — a dropped folder keeps its own name as the top-level directory under the current root, single files land in the folder you are browsing
+- thumbnails are generated on demand and cached on disk (see *Thumbnail behavior*); the grid renders in batches with lazy images, so a folder with thousands of files opens immediately
+- keyboard: `Esc` close, `Enter` pick the highlighted file and close, `Ctrl+A` select every match in the current folder (including files that are not rendered yet), `Delete` / `Backspace` delete the selection, `←` `→` `↑` `↓` move the highlight, `Space` open the large preview, `R` random, `C` cut, `V` paste (move), `/` focus the search box
+- **right-click a card** for a context menu (pick into node, preview, copy file name / relative path / absolute path, cut, delete)
+- toolbar `‹` `›` `🎲` step to the previous / next / random file and write it into the node **without closing the panel**
+- **Shift+click** selects the whole range between the anchor card and the clicked one (switches multi-select on automatically)
 - **Multi** only toggles multi-select mode; the **Delete** button next to it deletes the selected files (stays visible, greyed out when nothing is selected)
 - **Folder** dropdown can browse both the `input` and the `output` root, so a rendered image can be picked as input again (the node value becomes `"<file> [output]"`)
 - per-card **View** button (left of Delete) opens a **panel-sized preview**: the image fills the browser dialog and `‹` / `›` page through the current batch; the arrows sit outside the image, next to the panel edges, and `←` / `→` / `Esc` work too
@@ -93,10 +99,12 @@ Replace the old folder, restart ComfyUI, and hard refresh the web UI.
   
 ## Thumbnail behavior
 
-- thumbnails are not stored as separate files
-- previews are generated directly from the original media in the ComfyUI `input` directory
-- this node does not create a persistent thumbnail cache
-- closing ComfyUI does not remove any thumbnail files created by this node, because none are created
+- card previews come from `GET /thumbnails-modern/thumb?root=&relpath=&w=` — the browser scales the original down to a max edge of `w` (256 / 384 / 512 / 768 / 1024, pick your grid size)
+- the scaled copy is cached on disk at `<ComfyUI temp>/_tm_thumbs/<sha1(root|path|size|mtime|w)>.<webp|jpg>`; the cache key includes size + mtime, so a changed source file always produces a new thumbnail
+- responses carry `ETag` + `Cache-Control: public, max-age=0, must-revalidate`; the browser revalidates and a matching `If-None-Match` gets a cheap `304`, so an in-place overwrite is picked up immediately
+- videos and undecodable files return `404` and the browser falls back to the original file, so nothing is ever hidden
+- the cache is capped (oldest files are pruned past ~20000 entries) and lives in ComfyUI's **temp** directory, so it disappears with your normal temp cleanup
+- the file list is served from a per-directory mtime memo: a change inside **any** subfolder invalidates only the directories it touches, so `Refresh` stays fast on large trees
 
 ## Release
 

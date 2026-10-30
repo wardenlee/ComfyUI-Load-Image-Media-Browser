@@ -37,6 +37,15 @@ const WRITE_ROOTS = ["input", "code_input"];
 const STORAGE_KEY_LAST_FOLDER = "thumbnailsModern.lastFolder";
 const STORAGE_KEY_LAST_ROOT = "thumbnailsModern.lastRoot";
 const DEFAULT_ROOT_ID = "code_input"; // 默认显示「输入」(/tmp/code/input)
+// 缩略图宽度档位：按卡片显示尺寸向上取档，避免为每张图生成多份缓存
+const THUMB_WIDTHS = [256, 384, 512, 768, 1024];
+// 网格分批渲染：首批 RENDER_BATCH 张，滚到接近底部再追加
+const RENDER_BATCH = 60;
+let gridState = { images: [], rendered: 0 };
+let focusedIndex = -1; // 键盘/工具栏当前高亮的卡片（索引针对 filteredImages() 结果）
+let rangeAnchor = -1; // Shift 连选锚点
+let lazyObserver = null; // 卡片缩略图懒加载
+let contextMenu = null; // 卡片右键菜单
 
 function getSettingValue(id, fallback) {
   try {
@@ -248,6 +257,14 @@ function ensureStyles() {
     .tm-card.tm-selected{border-color:#4a9eff;background:rgba(74,158,255,.10);box-shadow:0 0 0 1px rgba(74,158,255,.45)}
     .tm-card.tm-current{outline:2px solid #f0b45a;outline-offset:1px}
     .tm-card.tm-cut{opacity:.45;outline:1px dashed #d9a441;outline-offset:1px}
+    .tm-card.tm-focused{outline:2px dashed #4a9eff;outline-offset:2px}
+    .tm-grid-status{padding:6px 14px;font-size:12px;opacity:.75;border-top:1px solid var(--border-color, #444);display:flex;gap:10px;align-items:center;min-height:20px}
+    .tm-grid-status .tm-btn{padding:4px 8px;font-size:11px}
+    .tm-menu{position:fixed;z-index:10020;min-width:200px;background:var(--comfy-menu-bg, #1f1f1f);border:1px solid var(--border-color, #555);border-radius:10px;padding:4px;box-shadow:0 12px 40px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:2px}
+    .tm-menu-item{text-align:left;border:0;background:transparent;color:inherit;border-radius:8px;padding:8px 10px;font-size:13px;cursor:pointer}
+    .tm-menu-item:hover{background:rgba(255,255,255,.10)}
+    .tm-menu-item.tm-danger{color:#ff9d9d}
+    .tm-menu-sep{height:1px;background:var(--border-color, #444);margin:4px 6px}
     .tm-selmark{position:absolute;top:8px;left:8px;width:24px;height:24px;border-radius:50%;background:#4a9eff;color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1;z-index:2}
     .tm-multi.active{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.28)}
     .tm-preview{position:relative;width:100%;height:var(--tm-preview-height, 160px);border-radius:10px;background:#111;overflow:hidden;display:flex;align-items:center;justify-content:center}
@@ -308,6 +325,9 @@ function ensureDialog() {
             <option value="name_asc">Name A–Z</option>
             <option value="name_desc">Name Z–A</option>
           </select>
+          <button class="tm-btn tm-nav-prev" type="button" title="上一张放进节点（←）">‹</button>
+          <button class="tm-btn tm-nav-next" type="button" title="下一张放进节点（→）">›</button>
+          <button class="tm-btn tm-nav-random" type="button" title="随机一张放进节点（R）">🎲</button>
           <button class="tm-btn tm-multi" title="Toggle multi-select mode (pick several files, then press Delete)">Multi</button>
           <button class="tm-btn tm-upload" title="Upload multiple files to the input folder">Upload</button>
           <button class="tm-btn tm-cut" title="Cut the selected file(s), then open a target folder and press Paste">Cut</button>
@@ -317,6 +337,7 @@ function ensureDialog() {
           <button class="tm-btn tm-close">Close</button>
         </div>
         <div class="tm-grid"></div>
+        <div class="tm-grid-status"></div>
       </div>
       <div class="tm-zoom">
         <div class="tm-zoom-media"></div>
@@ -343,6 +364,13 @@ function ensureDialog() {
   overlay.querySelector(".tm-zoom-nav.prev").addEventListener("click", () => stepZoom(-1));
   overlay.querySelector(".tm-zoom-nav.next").addEventListener("click", () => stepZoom(1));
   overlay.querySelector(".tm-zoom-close").addEventListener("click", closeZoom);
+  overlay.querySelector(".tm-nav-prev").addEventListener("click", () => stepFocused(-1, true));
+  overlay.querySelector(".tm-nav-next").addEventListener("click", () => stepFocused(1, true));
+  overlay.querySelector(".tm-nav-random").addEventListener("click", () => jumpRandom());
+  // 面板外点击/右键：关掉右键菜单
+  overlay.addEventListener("mousedown", (event) => {
+    if (contextMenu && !contextMenu.contains(event.target)) closeContextMenu();
+  });
   for (const sel of [".tm-upload", ".tm-upload-folder"]) {
     const btn = overlay.querySelector(sel);
     if (btn) btn.dataset.tip = btn.title;
@@ -393,13 +421,50 @@ function onDialogKeydown(event) {
     if (event.key === "Escape") { closeZoom(); return; }
     if (event.key === "ArrowLeft") { event.preventDefault?.(); stepZoom(-1); return; }
     if (event.key === "ArrowRight") { event.preventDefault?.(); stepZoom(1); return; }
+    return;
   }
-  if (event.key === "Escape") closeDialog();
+  if (event.key === "Escape") {
+    if (contextMenu) { closeContextMenu(); return; }
+    closeDialog();
+    return;
+  }
+  const target = event.target;
+  const typing = !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
+  if (typing) return;
+
+  const columns = Math.max(1, Number(getSettingValue(SETTINGS.columns, 4)) || 4);
+  if (event.ctrlKey && (event.key === "a" || event.key === "A")) { event.preventDefault?.(); selectAllVisible(); return; }
+  if (event.key === "Enter") {
+    event.preventDefault?.();
+    const item = focusedItem();
+    if (item && canSelectItem(item)) {
+      setNodeMedia(currentNode, item);
+      closeDialog();
+    }
+    return;
+  }
+  if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault?.(); deleteSelected(); return; }
+  if (event.key === "ArrowLeft") { event.preventDefault?.(); stepFocused(-1); return; }
+  if (event.key === "ArrowRight") { event.preventDefault?.(); stepFocused(1); return; }
+  if (event.key === "ArrowUp") { event.preventDefault?.(); stepFocused(-columns); return; }
+  if (event.key === "ArrowDown") { event.preventDefault?.(); stepFocused(columns); return; }
+  if (event.key === " " || event.key === "Spacebar") {
+    event.preventDefault?.();
+    const item = focusedItem();
+    if (item) openZoom(item);
+    return;
+  }
+  if (event.ctrlKey || event.metaKey || event.altKey) return; // 别抢 Ctrl+C / Ctrl+V / Ctrl+R 这类浏览器组合键
+  if (event.key === "r" || event.key === "R") { jumpRandom(); return; }
+  if (event.key === "c" || event.key === "C") { cutFiles(); return; }
+  if (event.key === "v" || event.key === "V") { pasteCutFiles(); return; }
+  if (event.key === "/") { event.preventDefault?.(); dialog?.querySelector(".tm-search")?.focus(); return; }
 }
 
 function closeDialog() {
   stopAutoRefresh();
   closeZoom();
+  closeContextMenu();
   document.removeEventListener("keydown", onDialogKeydown);
   if (dialog) dialog.style.display = "none";
 }
@@ -407,56 +472,44 @@ function closeDialog() {
 async function fetchListing(refresh = false) {
   const query = refresh ? "?refresh=1" : "";
   const response = await api.fetchApi(`/thumbnails-modern/list${query}`);
+  if (response.status === 304) {
+    // 中间层可能替我们发了 If-None-Match：304 表示列表没变，直接用现有数据
+    return currentData || { images: [], folders: [], roots: [] };
+  }
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
 
-// ---- Batch upload: uploads to ComfyUI's native input root via /upload/image ----
+// ---- 上传：统一走插件自己的 /thumbnails-modern/upload（确定性目录 + 重名跳过） ----
 const UPLOAD_ACCEPT = ".png,.jpg,.jpeg,.webp,.gif,.bmp,.mp4,.webm,.mov,.m4v,.mkv,.avi";
+
+// 落点规则（修「同一文件夹的图散到两个不同文件夹」）：
+// - 带相对路径的条目（上传文件夹 / 拖入文件夹）→ 直接用 rel 的目录部分：
+//   顶层目录 = 源文件夹名，固定落在当前根下，**不再叠加当前浏览的文件夹**
+// - 单个文件（多选上传 / 拖入文件）→ 仍落在当前浏览的文件夹，保持原有手感
+function uploadSubfolderFor(rel) {
+  const relDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+  if (relDir) return relDir;
+  return currentFolder === "." ? "" : normalizeFolder(currentFolder);
+}
+
+function uploadTopFolder(subfolder) {
+  const rel = String(subfolder || "").replace(/^\/+|\/+$/g, "");
+  return rel ? rel.split("/")[0] : ".";
+}
 
 async function uploadOneFile(file, subfolder, idx, total, progressBtn) {
   const rootId = currentRoot || "input";
-  const ownUpload = rootId !== "input";
   const formData = new FormData();
   formData.append("image", file);
-  formData.append("type", "input");
-  formData.append("subfolder", subfolder || "");
-  formData.append("overwrite", "false");
   if (progressBtn) progressBtn.textContent = total > 1 ? `Uploading ${idx + 1}/${total}` : "Uploading…";
   try {
-    let response;
-    if (ownUpload) {
-      const qs = new URLSearchParams({ root: rootId, subfolder: subfolder || "" });
-      response = await api.fetchApi(`/thumbnails-modern/upload?${qs.toString()}`, { method: "POST", body: formData });
-    } else {
-      response = await api.fetchApi("/upload/image", { method: "POST", body: formData });
-    }
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    if (ownUpload) {
-      if (data && data.skipped) return { skipped: true, name: file.name };
-      if (!data || !data.ok) throw new Error((data && data.error) || "upload failed");
-      return { ok: true, name: file.name };
-    }
-    const savedName = (data && data.name) || file.name;
-    if (savedName !== file.name) {
-      // ComfyUI auto-renamed the file (e.g. "x (1).png") because one with the same
-      // name already exists -> remove the duplicate and report it as skipped.
-      const dupRel = subfolder ? `${subfolder}/${savedName}` : savedName;
-      try {
-        const delResp = await api.fetchApi("/thumbnails-modern/delete", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ relpath: dupRel }),
-        });
-        const delPayload = await delResp.json();
-        if (!delResp.ok || !delPayload.ok) throw new Error(delPayload.error || `HTTP ${delResp.status}`);
-        return { skipped: true, name: file.name };
-      } catch (delErr) {
-        console.warn("Thumbnails Modern: duplicate cleanup failed:", file.name, delErr);
-        return { ok: false, name: file.name, error: `duplicate cleanup failed: ${delErr.message || delErr}` };
-      }
-    }
+    const qs = new URLSearchParams({ root: rootId, subfolder: subfolder || "" });
+    const response = await api.fetchApi(`/thumbnails-modern/upload?${qs.toString()}`, { method: "POST", body: formData });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error((data && data.error) || `HTTP ${response.status}`);
+    if (data && data.skipped) return { skipped: true, name: file.name };
+    if (!data || !data.ok) throw new Error((data && data.error) || "upload failed");
     return { ok: true, name: file.name };
   } catch (err) {
     console.warn("Thumbnails Modern: upload failed:", file.name, err);
@@ -464,27 +517,41 @@ async function uploadOneFile(file, subfolder, idx, total, progressBtn) {
   }
 }
 
-// ---- 上传：按「相对路径」批量写入当前根（文件、文件夹、拖拽共用） ----
+// ---- 按「相对路径」批量写入当前根（文件、文件夹、拖拽共用） ----
 async function uploadFileEntries(picked, buttonSelector = ".tm-upload") {
   const total = picked.length;
-  if (!total) return;
+  if (!total) return { ok: 0, skipped: 0, failed: 0, tops: [] };
   const btn = dialog?.querySelector(buttonSelector);
   const originalText = btn ? btn.textContent : "Upload";
   let okCount = 0;
   let failCount = 0;
   let skipCount = 0;
+  const tops = new Set();
   for (let i = 0; i < total; i++) {
     const { rel, file } = picked[i];
-    const relDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
-    const subfolder = currentFolder === "." ? relDir : [currentFolder, relDir].filter(Boolean).join("/");
+    const carriesRelativeDir = rel.includes("/"); // 文件夹上传 / 拖入文件夹才有相对路径
+    const subfolder = uploadSubfolderFor(rel);
     const result = await uploadOneFile(file, subfolder, i, total, btn);
     if (result.ok) okCount++;
     else if (result.skipped) skipCount++;
     else failCount++;
+    if ((result.ok || result.skipped) && carriesRelativeDir) tops.add(uploadTopFolder(subfolder));
   }
   if (btn) btn.textContent = originalText;
-  alert(`Upload finished: ${okCount} ok, ${skipCount} skipped (already exists), ${failCount} failed`);
-  if (okCount > 0) await refreshListingInPlace(true);
+  const rootId = currentRoot || "input";
+  const topsList = [...tops].filter((top) => top && top !== ".").sort();
+  const landing = topsList.length
+    ? topsList.map((top) => `${rootId}/${top}/`).join(" , ")
+    : `${rootId}${currentFolder === "." ? "/" : `/${normalizeFolder(currentFolder)}/`}`;
+  alert(`Upload finished: ${okCount} ok, ${skipCount} skipped (already exists), ${failCount} failed\n写入目录：${landing}`);
+  // 文件夹上传后把面板切到刚写入的顶层目录：否则用户看不到新图，
+  // 再传一次就会叠成 <目录>/<目录>/（此前"散到两个文件夹"最可能的成因）
+  if (topsList.length === 1 && normalizeFolder(currentFolder) !== topsList[0]) {
+    currentFolder = topsList[0];
+    rememberFolder(currentNode, currentFolder);
+  }
+  if (okCount > 0 || skipCount > 0) await refreshListingInPlace(true);
+  return { ok: okCount, skipped: skipCount, failed: failCount, tops: topsList };
 }
 
 async function uploadFiles(fileList) {
@@ -654,9 +721,10 @@ function enableDragDrop(overlayEl) {
 }
 
 // ---- Multi-select delete ----
-function toggleMultiSelect() {
-  multiSelect = !multiSelect;
-  selectedSet.clear();
+function toggleMultiSelect(force) {
+  multiSelect = typeof force === "boolean" ? force : !multiSelect;
+  if (!multiSelect) selectedSet.clear();
+  rangeAnchor = -1;
   const multiBtn = dialog?.querySelector(".tm-multi");
   if (multiBtn) multiBtn.classList.toggle("active", multiSelect);
   updateDeleteButton();
@@ -984,7 +1052,7 @@ async function fitNodePreviewToMedia(node, relpath, explicitType = null) {
   }
 }
 
-async function setNodeMedia(node, item) {
+async function setNodeMedia(node, item, keepOpen = false) {
   const widget = widgetForNode(node);
   if (!widget) return;
   const isItem = item && typeof item === "object";
@@ -1000,7 +1068,7 @@ async function setNodeMedia(node, item) {
   await fitNodePreviewToMedia(node, value);
   widget.callback?.(widget.value);
   node.setDirtyCanvas?.(true, true);
-  closeDialog();
+  if (!keepOpen) closeDialog();
 }
 
 async function deleteImage(relpath, root = "input") {
@@ -1061,6 +1129,91 @@ function mediaUrl(relpath, rootHint) {
   return api.apiURL(`/view?${params.toString()}`);
 }
 
+// ---- 缩略图（后端生成 + 磁盘缓存；失败自动回落原图） ----
+function thumbWidthFor(thumbSize) {
+  const wanted = Math.max(64, Number(thumbSize || 120) * 2);
+  for (const width of THUMB_WIDTHS) if (wanted <= width) return width;
+  return THUMB_WIDTHS[THUMB_WIDTHS.length - 1];
+}
+
+function thumbUrl(relpath, rootHint, width) {
+  const { root, rel } = splitRelpath(relpath);
+  const effectiveRoot = rootHint || annotationOf(relpath) || root;
+  const params = new URLSearchParams({ root: effectiveRoot, relpath: rel, w: String(width || 256) });
+  return api.apiURL(`/thumbnails-modern/thumb?${params.toString()}`);
+}
+
+function ensureLazyObserver() {
+  if (lazyObserver) return lazyObserver;
+  if (typeof IntersectionObserver !== "function") return null;
+  const grid = dialog?.querySelector(".tm-grid") || null;
+  lazyObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      lazyObserver.unobserve(entry.target);
+      const img = entry.target;
+      if (!img.dataset || !img.dataset.src) continue;
+      img.src = img.dataset.src;
+      delete img.dataset.src;
+    }
+  }, { root: grid, rootMargin: "400px 0px" });
+  return lazyObserver;
+}
+
+// 卡片预览图：可视区才真正请求缩略图；缩略图 404/解码失败时回落原图
+function observeCardMedia(card) {
+  const img = card.querySelector("img[data-src]");
+  if (!img) return;
+  img.addEventListener("error", () => {
+    if (img.dataset.fallback) return;
+    img.dataset.fallback = "1";
+    if (img.dataset.full) img.src = img.dataset.full;
+  });
+  const load = () => {
+    if (!img.dataset.src) return;
+    img.src = img.dataset.src;
+    delete img.dataset.src;
+  };
+  const observer = ensureLazyObserver();
+  if (!observer) { load(); return; }
+  observer.observe(img);
+}
+
+// 分批渲染：滚到接近底部时再追加，避免一次建几千个 DOM 节点
+let gridAppendMore = null;
+
+function ensureGridScrollHook(grid) {
+  if (grid.__tmScrollHook) return;
+  grid.__tmScrollHook = true;
+  grid.addEventListener("scroll", () => {
+    closeContextMenu(); // 菜单是 position:fixed，滚动后位置会失真
+    if (!gridAppendMore) return;
+    if (gridState.rendered >= gridState.images.length) return;
+    if (grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 400) gridAppendMore();
+  });
+}
+
+function updateGridStatus() {
+  const status = dialog?.querySelector(".tm-grid-status");
+  if (!status) return;
+  status.innerHTML = "";
+  delete status.dataset.hint; // 每次重建状态栏都允许重新提示「当前图还有多远」
+  const total = gridState.images.length;
+  if (!total) return;
+  const label = document.createElement("span");
+  label.textContent = gridState.rendered < total
+    ? `已加载 ${gridState.rendered} / ${total} 张（滚动自动加载更多；缩略图按需生成并缓存）`
+    : `${total} 张`;
+  status.appendChild(label);
+  if (gridState.rendered < total && typeof gridAppendMore === "function") {
+    const more = document.createElement("button");
+    more.className = "tm-btn";
+    more.textContent = "载入更多";
+    more.addEventListener("click", () => gridAppendMore && gridAppendMore());
+    status.appendChild(more);
+  }
+}
+
 function renderFolders() {
   const list = dialog.querySelector(".tm-folder-list");
   list.innerHTML = "";
@@ -1105,16 +1258,25 @@ function renderGrid() {
   grid.style.setProperty("--tm-cols", String(columns));
   grid.style.setProperty("--tm-fit", fitMode === "cover" ? "cover" : "contain");
   grid.style.setProperty("--tm-preview-height", `${previewHeight + 45}px`); // 卡片信息从 4 行减到 2 行, 省出的 45px 让给预览图
+  if (lazyObserver) lazyObserver.disconnect();
   grid.innerHTML = "";
+  closeContextMenu();
+  gridState = { images: [], rendered: 0 };
+  gridAppendMore = null;
+  focusedIndex = -1;
+  rangeAnchor = -1;
 
   const images = filteredImages();
   if (!images.length) {
     grid.innerHTML = `<div class="tm-empty">No matching media found in this folder.</div>`;
+    updateGridStatus();
     return;
   }
+  gridState = { images, rendered: 0 };
 
-  for (const item of images) {
+  const buildCard = (item, index) => {
     const card = document.createElement("div");
+    card.dataset.index = String(index);
     const isSelected = selectedSet.has(item.relpath);
     card.className = "tm-card" + (isSelected ? " tm-selected" : "");
     if (currentNodeRel && item.relpath === currentNodeRel && (item.root || "input") === currentNodeRoot) {
@@ -1128,7 +1290,7 @@ function renderGrid() {
         const autoplay = autoplayVideos ? "autoplay muted loop playsinline" : "controls muted playsinline";
         mediaHtml = `<div class="tm-preview"><video loading="lazy" src="${mediaUrl(item.relpath, item.root)}" ${autoplay}></video><div class="tm-badge">VIDEO</div></div>`;
       } else {
-        mediaHtml = `<div class="tm-preview"><img loading="lazy" src="${mediaUrl(item.relpath, item.root)}" alt="${escapedName}" onerror="this.dataset.error=1;this.title='Thumbnail could not be loaded';" /><span class="tm-selmark"${isSelected ? "" : " style=\"display:none\""}>✓</span></div>`;
+        mediaHtml = `<div class="tm-preview"><img loading="lazy" decoding="async" data-src="${thumbUrl(item.relpath, item.root, thumbWidthFor(thumbSize))}" data-full="${mediaUrl(item.relpath, item.root)}" alt="${escapedName}" /><span class="tm-selmark"${isSelected ? "" : " style=\"display:none\""}>✓</span></div>`;
       }
     } else {
       mediaHtml = `<div class="tm-preview"><span class="tm-selmark"${isSelected ? "" : " style=\"display:none\""}>✓</span></div>`;
@@ -1139,20 +1301,17 @@ function renderGrid() {
     card.innerHTML = `${mediaHtml}${nameHtml}<div class="tm-meta"><span>${item.folder}</span><span>${Math.round(item.size / 1024)} KB</span></div>`;
     if (!usableInNode) card.classList.add("not-selectable");
 
-    if (multiSelect) {
-      // Multi-select mode: click toggles selection (any media, image or video)
-      card.addEventListener("click", (event) => {
-        event.stopPropagation();
-        if (selectedSet.has(item.relpath)) selectedSet.delete(item.relpath);
-        else selectedSet.add(item.relpath);
-        const mark = card.querySelector(".tm-selmark");
-        if (mark) mark.style.display = selectedSet.has(item.relpath) ? "" : "none";
-        card.classList.toggle("tm-selected", selectedSet.has(item.relpath));
-        updateDeleteButton();
-      });
-    } else if (usableInNode) {
-      card.addEventListener("click", () => setNodeMedia(currentNode, item));
-    }
+    // 点击：多选模式切换勾选；Shift+点击 = 连选两点之间全部；普通模式 = 写入节点
+    card.addEventListener("click", (event) => handleCardClick(item, index, event));
+    card.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.shiftKey) {
+        handleCardClick(item, index, { shiftKey: true, stopPropagation: () => {} });
+        return;
+      }
+      openContextMenu(event, item);
+    });
 
     if (!multiSelect) {
       const actions = document.createElement("div");
@@ -1184,8 +1343,237 @@ function renderGrid() {
       card.appendChild(actions);
     }
 
-    grid.appendChild(card);
+    observeCardMedia(card);
+    return card;
+  };
+
+  const appendBatch = () => {
+    if (gridState.rendered >= images.length) return;
+    const end = Math.min(images.length, gridState.rendered + RENDER_BATCH);
+    const frag = document.createDocumentFragment();
+    for (let i = gridState.rendered; i < end; i++) frag.appendChild(buildCard(images[i], i));
+    grid.appendChild(frag);
+    gridState.rendered = end;
+    updateGridStatus();
+  };
+  gridAppendMore = appendBatch;
+  appendBatch();
+  ensureGridScrollHook(grid);
+}
+
+// ---- 卡片交互（点击 / Shift 连选 / 键盘高亮 / 工具栏翻页 / 右键菜单） ----
+function gridCardAt(index) {
+  return dialog?.querySelector(`.tm-grid .tm-card[data-index="${index}"]`) || null;
+}
+
+function focusedItem() {
+  return gridState.images[focusedIndex] || null;
+}
+
+function setFocused(index, scroll = false) {
+  focusedIndex = index;
+  const grid = dialog?.querySelector(".tm-grid");
+  if (!grid) return;
+  for (const card of grid.querySelectorAll(".tm-card")) {
+    card.classList.toggle("tm-focused", Number(card.dataset.index) === index);
   }
+  if (!scroll) return;
+  while (index >= gridState.rendered && gridState.rendered < gridState.images.length) {
+    if (typeof gridAppendMore === "function") gridAppendMore();
+    else break;
+  }
+  const card = gridCardAt(index);
+  if (card && typeof card.scrollIntoView === "function") card.scrollIntoView({ block: "nearest" });
+}
+
+function handleCardClick(item, index, event) {
+  event?.stopPropagation?.();
+  setFocused(index, false);
+  const images = gridState.images;
+  // Shift+点击：#1 进入多选并选中该卡（设为锚点），#2 起选中锚点与当前卡之间全部
+  if (event?.shiftKey && images.length) {
+    const anchor = rangeAnchor >= 0 && rangeAnchor < images.length ? rangeAnchor : index;
+    if (!multiSelect) toggleMultiSelect(true); // 注意：它会把 rangeAnchor 清成 -1，所以先取本地副本
+    const from = Math.min(anchor, index);
+    const to = Math.max(anchor, index);
+    for (let i = from; i <= to; i++) selectedSet.add(images[i].relpath);
+    renderGrid();
+    // 必须在 renderGrid 之后设锚点：renderGrid 会把 rangeAnchor 复位成 -1
+    rangeAnchor = index;
+    setFocused(index, false);
+    updateDeleteButton();
+    return;
+  }
+  if (multiSelect) {
+    if (selectedSet.has(item.relpath)) selectedSet.delete(item.relpath);
+    else selectedSet.add(item.relpath);
+    rangeAnchor = index;
+    const card = gridCardAt(index);
+    if (card) {
+      const mark = card.querySelector(".tm-selmark");
+      if (mark) mark.style.display = selectedSet.has(item.relpath) ? "" : "none";
+      card.classList.toggle("tm-selected", selectedSet.has(item.relpath));
+    }
+  } else if (canSelectItem(item)) {
+    rangeAnchor = index;
+    setNodeMedia(currentNode, item);
+  }
+  updateDeleteButton();
+}
+
+function selectAllVisible() {
+  const images = gridState.images;
+  if (!images.length) return;
+  const keepFocus = focusedIndex;
+  if (!multiSelect) toggleMultiSelect(true);
+  for (const item of images) selectedSet.add(item.relpath);
+  renderGrid();
+  if (keepFocus >= 0) setFocused(keepFocus, false);
+  updateDeleteButton();
+}
+
+function refreshCurrentCardMark() {
+  const grid = dialog?.querySelector(".tm-grid");
+  if (!grid) return;
+  const value = widgetForNode(currentNode)?.value || "";
+  const rel = stripAnnotation(value);
+  const root = annotationOf(value) || "input";
+  for (const card of grid.querySelectorAll(".tm-card")) {
+    const item = gridState.images[Number(card.dataset.index)];
+    card.classList.toggle("tm-current", !!item && item.relpath === rel && (item.root || "input") === root);
+  }
+}
+
+// 打开面板时把「节点当前图」带进视野：必要时追加批次，但最多追加 20 批（1200 张），
+// 免得为了滚到第 9000 张又把整棵树渲染回来；没追到时在状态栏里说明。
+function revealCurrentCard() {
+  const value = widgetForNode(currentNode)?.value || "";
+  const rel = stripAnnotation(value);
+  if (!rel) return;
+  const root = annotationOf(value) || "input";
+  const index = gridState.images.findIndex((item) => item.relpath === rel && (item.root || "input") === root);
+  if (index < 0) return;
+  let guard = 0;
+  while (index >= gridState.rendered && gridState.rendered < gridState.images.length && guard < 5) {
+    if (typeof gridAppendMore !== "function") break;
+    gridAppendMore();
+    guard += 1;
+  }
+  const card = gridCardAt(index);
+  if (card && typeof card.scrollIntoView === "function") {
+    card.scrollIntoView({ block: "nearest" });
+  } else {
+    const status = dialog?.querySelector(".tm-grid-status");
+    if (status && !status.dataset.hint) {
+      status.dataset.hint = "1";
+      const hint = document.createElement("span");
+      hint.textContent = `（当前图在列表第 ${index + 1} 张，继续向下滚动或点「载入更多」）`;
+      status.appendChild(hint);
+    }
+  }
+}
+
+function stepFocused(delta, applyToNode = false) {
+  const images = gridState.images;
+  if (!images.length) return;
+  const base = focusedIndex < 0 ? (delta > 0 ? -1 : images.length) : focusedIndex;
+  const next = ((base + delta) % images.length + images.length) % images.length;
+  setFocused(next, true);
+  const item = images[next];
+  if (applyToNode && item && canSelectItem(item)) {
+    // 工具栏「上一张/下一张」：写入节点但**不关面板**，方便连续翻
+    setNodeMedia(currentNode, item, true).then(() => {
+      refreshCurrentCardMark();
+      setFocused(next, false);
+    }).catch(() => {});
+  }
+}
+
+function jumpRandom() {
+  const images = gridState.images.filter((item) => canSelectItem(item));
+  if (!images.length) return;
+  const pick = images[Math.floor(Math.random() * images.length)];
+  const index = gridState.images.indexOf(pick);
+  if (index >= 0) setFocused(index, true);
+  setNodeMedia(currentNode, pick, true).then(() => {
+    refreshCurrentCardMark();
+    if (index >= 0) setFocused(index, false);
+  }).catch(() => {});
+}
+
+// ---- 卡片右键菜单 ----
+function closeContextMenu() {
+  if (!contextMenu) return;
+  contextMenu.remove();
+  contextMenu = null;
+}
+
+async function copyItemAbsolutePath(item) {
+  const params = new URLSearchParams({ root: item.root || "input", folder: item.folder === "." ? "" : item.folder });
+  const response = await api.fetchApi(`/thumbnails-modern/folder_path?${params.toString()}`);
+  const data = await response.json();
+  if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  const sep = String(data.path).includes("\\") ? "\\" : "/";
+  const full = String(data.path).endsWith(sep) ? `${data.path}${item.name}` : `${data.path}${sep}${item.name}`;
+  if (!(await copyTextToClipboard(full))) window.prompt("Copy the absolute path:", full);
+}
+
+function openContextMenu(event, item) {
+  closeContextMenu();
+  const rootId = item.root || "input";
+  const menu = document.createElement("div");
+  menu.className = "tm-menu";
+  const addItem = (label, handler, opts = {}) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tm-menu-item" + (opts.danger ? " tm-danger" : "");
+    btn.textContent = label;
+    btn.addEventListener("click", async (clickEvent) => {
+      clickEvent.stopPropagation();
+      closeContextMenu();
+      try {
+        await handler();
+      } catch (err) {
+        alert(`${label} failed: ${err.message || err}`);
+      }
+    });
+    menu.appendChild(btn);
+  };
+  const addSeparator = () => {
+    const line = document.createElement("div");
+    line.className = "tm-menu-sep";
+    menu.appendChild(line);
+  };
+
+  if (canSelectItem(item)) addItem("设为节点图片（Enter）", () => setNodeMedia(currentNode, item));
+  addItem("预览（Space）", () => openZoom(item));
+  addSeparator();
+  addItem("复制文件名", async () => { if (!(await copyTextToClipboard(item.name))) window.prompt("Copy file name:", item.name); });
+  addItem("复制相对路径", async () => { if (!(await copyTextToClipboard(item.relpath))) window.prompt("Copy relative path:", item.relpath); });
+  addItem("复制绝对路径", () => copyItemAbsolutePath(item));
+  addSeparator();
+  addItem("剪切（C）", () => {
+    cutBuffer = [{ root: rootId, relpath: item.relpath }];
+    cutSet.clear();
+    cutSet.add(`${rootId}:${item.relpath}`);
+    updateCutButtons();
+    renderGrid();
+  });
+  if (getSettingValue(SETTINGS.deleteEnabled, true) && WRITE_ROOTS.includes(rootId)) {
+    addItem("删除", async () => {
+      if (!confirm(`Delete file?\n${item.relpath}`)) return;
+      await deleteImage(item.relpath, rootId);
+      await refreshListingInPlace(true);
+    }, { danger: true });
+  }
+
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(event.clientX, window.innerWidth - rect.width - 8));
+  const top = Math.max(8, Math.min(event.clientY, window.innerHeight - rect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  contextMenu = menu;
 }
 
 // ---- Copy the absolute path of the selected folder (sidebar footer button) ----
@@ -1372,9 +1760,8 @@ async function openDialog(node, refresh = false) {
   renderFolders();
   renderGrid();
   updateRootActions();
-  const currentCard = dialog.querySelector(".tm-grid .tm-card.tm-current");
-  if (currentCard && typeof currentCard.scrollIntoView === "function") currentCard.scrollIntoView({ block: "nearest" });
   dialog.style.display = "flex";
+  revealCurrentCard();
   // Auto refresh while dialog is open (keeps new uploads visible without manual Refresh)
   stopAutoRefresh();
   if (getSettingValue(SETTINGS.autoRefreshFolder, false)) {
