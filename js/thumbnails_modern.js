@@ -62,10 +62,9 @@ function normalizeFolder(value) {
   return value && value !== "" ? value : ".";
 }
 
-// ComfyUI's mask editor / painter store the edited image and set the widget to
-// "<file> [input]" (see folder_paths.annotated_filepath). Strip that suffix for
-// listing / preview / folder logic, but keep it on the widget value itself.
-const ANNOTATION_SUFFIX_RE = /\s*\[(?:input|output|temp)\]\s*$/i;
+// ComfyUI's mask editor / painter use "<file> [input]"; this browser also writes
+// "<file> [<root>]" for output / 输入, and the backend resolves any browse root.
+const ANNOTATION_SUFFIX_RE = /\s*\[([A-Za-z0-9_]+)\]\s*$/;
 
 function stripAnnotation(value) {
   return String(value || "").replace(ANNOTATION_SUFFIX_RE, "");
@@ -76,12 +75,12 @@ function hasAnnotation(value) {
 }
 
 function annotationOf(value) {
-  const match = String(value || "").match(/\[(input|output|temp)\]\s*$/i);
+  const match = String(value || "").match(ANNOTATION_SUFFIX_RE);
   return match ? match[1].toLowerCase() : null;
 }
 
-// Widget value for an item: files outside the input root carry the annotation
-// suffix understood by the native Load Image node ("<file> [output]").
+// Widget value for an item: files outside the input root carry the root
+// annotation suffix ("<file> [output]", "<file> [code_input]").
 function itemValue(item) {
   const rel = String(item?.relpath || "");
   const root = item?.root || "input";
@@ -134,8 +133,6 @@ function listImagesForFolder(data, folder, node = currentNode, rootId = currentR
 
 function updateWidgetChoicesForFolder(node, folder, data = currentData, opts = {}) {
   const rootId = opts.root || currentRoot || "input";
-  // 自定义来源目录（如 /tmp/code/input）只用于浏览/剪切，不写进节点下拉选项
-  if (!["input", "output"].includes(rootId)) return;
   const widget = widgetForNode(node);
   if (!widget || !data) return;
   const items = listImagesForFolder(data, folder, node, rootId);
@@ -771,9 +768,8 @@ function triggerUpload() {
 }
 
 function canSelectItem(item, node = currentNode) {
-  // 自定义来源目录（/tmp/code/input 等）只用于浏览：先 Cut → 到 input 里 Paste 再用
-  const root = item?.root || "input";
-  if (root !== "input" && root !== "output") return false;
+  // 三个根（input / output / 输入）的图都能直接选进节点：
+  // 非 input 根会写成 "<file> [<root>]"，由后端 _resolve_input_file 解析
   const mode = mediaModeForNode(node);
   if (mode === "video") return item?.media_type === "video";
   return item?.media_type === "image" && item?.selectable !== false;

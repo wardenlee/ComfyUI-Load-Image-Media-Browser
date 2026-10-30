@@ -43,7 +43,7 @@ def _safe_rel_path(value: str) -> str:
 # (see folder_paths.annotated_filepath / get_annotated_filepath). The mask
 # editor and the painter both write that suffix into the widget value, so the
 # backend must resolve it exactly like the native LoadImage node does.
-ANNOTATED_SUFFIX_RE = re.compile(r"\s*\[(input|output|temp)\]\s*$", re.IGNORECASE)
+ANNOTATED_SUFFIX_RE = re.compile(r"\s*\[([A-Za-z0-9_]+)\]\s*$")
 
 
 def _split_annotation(value: str) -> Tuple[str, str]:
@@ -51,15 +51,22 @@ def _split_annotation(value: str) -> Tuple[str, str]:
     match = ANNOTATED_SUFFIX_RE.search(raw)
     if not match:
         return raw, None
-    return raw[: match.start()], match.group(1).lower()
+    kind = match.group(1).lower()
+    # 只有能解析成真实根目录的后缀才当标注，避免把普通文件名里的 [xxx] 误判
+    try:
+        _annotation_base_dir(kind)
+    except Exception:
+        return raw, None
+    return raw[: match.start()], kind
 
 
 def _annotation_base_dir(kind: str) -> Path:
+    """Resolve the annotation suffix: input/output/temp or any browse root id."""
     if kind == "output":
         return Path(folder_paths.get_output_directory()).resolve()
     if kind == "temp":
         return Path(folder_paths.get_temp_directory()).resolve()
-    return _input_root()
+    return _root_dir(kind)
 
 
 def _resolve_input_file(value: str) -> Path:
@@ -204,7 +211,12 @@ def _scan_input_tree(force: bool = False) -> Dict[str, object]:
 
 def _list_choices() -> List[str]:
     listing = _scan_input_tree()
-    values = [item["relpath"] for item in listing["images"] if item.get("root", "input") == "input"]
+    values = []
+    for item in listing["images"]:
+        root = item.get("root", "input")
+        rel = item["relpath"]
+        # 非 input 根用 "<relpath> [<root>]" 标注，节点用 _resolve_input_file 解析
+        values.append(rel if root == "input" else f"{rel} [{root}]")
     return values or [""]
 
 
