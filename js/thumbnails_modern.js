@@ -64,6 +64,208 @@ function getSettingValue(id, fallback) {
   }
 }
 
+// ---- 界面语言：跟随 ComfyUI 的语言设置（中 / 英），探测多个来源，兜底英文 ----
+// 只覆盖面板自身的按钮 / 标签 / 提示；节点名、根目录名（input/输入…）来自后端，不在此处翻译。
+const I18N = {
+  zh: {
+    images: "图片",
+    videos: "视频",
+    sortDateDesc: "日期 ↓",
+    sortDateAsc: "日期 ↑",
+    sortNameAsc: "名称 A–Z",
+    sortNameDesc: "名称 Z–A",
+    batch: "▶ 批跑",
+    batchWithCount: (n) => `▶ 批跑 (${n})`,
+    stopWithCount: (i, n) => `■ 停止 (${i}/${n})`,
+    batchTip: "按顺序逐张填入节点并排队：前一张跑完才提交下一张；未勾选时批跑当前视图的全部图片",
+    stopTip: "停止：当前这张跑完就不再提交下一张",
+    multi: "多选",
+    multiTip: "切换多选模式（勾选多张后按「删除」）",
+    upload: "上传",
+    uploadTip: "上传多个文件到当前文件夹",
+    cut: "剪切",
+    cutTip: "剪切选中的图片，切到目标文件夹后按「粘贴」",
+    paste: "粘贴",
+    pasteTip: "把剪切的图片移动到当前文件夹",
+    delete: "删除",
+    deleteTip: "删除选中的图片",
+    refresh: "刷新",
+    close: "关闭",
+    mediaRoot: "媒体根目录",
+    zoomPrev: "上一张",
+    zoomNext: "下一张",
+    search: "搜索文件或文件夹",
+    uploadFolder: "上传文件夹",
+    uploadFolderTip: "上传整个文件夹（保留子目录结构）",
+    copyPath: "复制路径",
+    copyPathTip: "复制所选文件夹的绝对路径",
+    deleteFolder: "删除文件夹",
+    deleteFolderTip: "删除所选文件夹及其全部内容",
+    recentUpload: "🕒 最近上传",
+    recentUsed: "⭐ 最近使用",
+    view: "查看",
+    loadMore: "载入更多",
+    loadedOf: (rendered, total) => `已加载 ${rendered} / ${total} 张（滚动自动加载更多；缩略图按需生成并缓存）`,
+    countOf: (n) => `${n} 张`,
+    hintCurrent: (index) => `（当前图在列表第 ${index} 张，继续向下滚动或点「载入更多」）`,
+    browseMedia: "浏览媒体",
+    menuPick: "设为节点图片（Enter）",
+    menuPreview: "预览（Space）",
+    menuCopyName: "复制文件名",
+    menuCopyRel: "复制相对路径",
+    menuCopyAbs: "复制绝对路径",
+    menuCut: "剪切（C）",
+    menuDelete: "删除",
+    batchFill: (i, n, name) => `批跑 ${i}/${n}：填入 ${name} …`,
+    batchSubmitted: (i, n) => `批跑 ${i}/${n}：已提交，等待该任务完成 …`,
+    batchDone: (n) => `批跑完成 ${n}/${n}`,
+    batchStopped: (done, total) => `批跑已停止（已跑 ${done}/${total}）`,
+    batchFailed: (done, total) => `批跑中断（已跑 ${done}/${total}）`,
+    batchNoItems: "当前视图没有可批跑的图片。",
+    batchConfirmAll: (n) => `未勾选任何图片：按顺序批跑当前视图的全部 ${n} 张？\n（前一张跑完才提交下一张）`,
+    batchInterrupted: (message) => `批跑中断：${message}`,
+    noSupported: "没有可上传的媒体文件。",
+    readOnlyRoot: "当前根目录是只读的（output），请先切到 input 或 输入 再拖入。",
+    uploadSummary: (ok, skipped, failed, landing) => `上传完成：成功 ${ok}，跳过（已存在）${skipped}，失败 ${failed}\n写入目录：${landing}`,
+    virtualDelete: "「最近上传 / 最近使用」是聚合视图，不能整体删除；请先切到真实文件夹。",
+    noMatch: "这个文件夹里没有符合条件的媒体。",
+    cutWithCount: (n) => `剪切 (${n})`,
+    pasteWithCount: (n) => `粘贴 (${n})`,
+    copied: "已复制",
+    cutNoSelection: "先勾选要剪切的图片（多选模式），或先在节点里选中一张属于当前目录的图片。",
+    copyPathPrompt: "复制文件夹路径：",
+    copyAbsPrompt: "复制绝对路径：",
+    deleteFileConfirm: (rel) => `删除这个文件？\n${rel}`,
+    deleteSelectedConfirm: (n, list) => `删除选中的 ${n} 个文件？\n${list}`,
+    moveConfirm: (n, label) => `把 ${n} 个文件移动进「${label}」？`,
+    deleteResult: (ok, failedCount, list) => failedCount
+      ? `已删除 ${ok} 个文件，${failedCount} 个失败：\n${list}`
+      : `已删除 ${ok} 个文件`,
+    actionFailed: (label, message) => `${label}失败：${message}`,
+    writeRootOnlyTip: "只有 input / 输入 根可用",
+    folderDeleteDisabledTip: "先选一个真实文件夹（媒体根目录与聚合视图都不能删）",
+  },
+  en: {
+    images: "Images",
+    videos: "Videos",
+    sortDateDesc: "Date ↓",
+    sortDateAsc: "Date ↑",
+    sortNameAsc: "Name A–Z",
+    sortNameDesc: "Name Z–A",
+    batch: "▶ Batch",
+    batchWithCount: (n) => `▶ Batch (${n})`,
+    stopWithCount: (i, n) => `■ Stop (${i}/${n})`,
+    batchTip: "Fill the node and queue one image at a time: the next one is submitted only after the previous job finished; with nothing checked it runs everything currently shown",
+    stopTip: "Stop: the current image finishes, no further one is submitted",
+    multi: "Multi",
+    multiTip: "Toggle multi-select mode (check several files, then press Delete)",
+    upload: "Upload",
+    uploadTip: "Upload multiple files into the current folder",
+    cut: "Cut",
+    cutTip: "Cut the checked files, open a target folder, then paste",
+    paste: "Paste",
+    pasteTip: "Move the cut files into the current folder",
+    delete: "Delete",
+    deleteTip: "Delete the checked files",
+    refresh: "Refresh",
+    close: "Close",
+    mediaRoot: "Media root",
+    zoomPrev: "Previous",
+    zoomNext: "Next",
+    search: "Search file or folder",
+    uploadFolder: "Upload folder",
+    uploadFolderTip: "Upload an entire folder (subfolders preserved)",
+    copyPath: "Copy path",
+    copyPathTip: "Copy the absolute path of the selected folder",
+    deleteFolder: "Delete folder",
+    deleteFolderTip: "Delete the selected folder and everything inside it",
+    recentUpload: "🕒 Recently uploaded",
+    recentUsed: "⭐ Recently used",
+    view: "View",
+    loadMore: "Load more",
+    loadedOf: (rendered, total) => `${rendered} / ${total} loaded — scroll for more; thumbnails are generated on demand and cached`,
+    countOf: (n) => `${n} items`,
+    hintCurrent: (index) => `(the current image is #${index} in the list — scroll down or press "load more")`,
+    browseMedia: "Browse Media",
+    menuPick: "Pick into node (Enter)",
+    menuPreview: "Preview (Space)",
+    menuCopyName: "Copy file name",
+    menuCopyRel: "Copy relative path",
+    menuCopyAbs: "Copy absolute path",
+    menuCut: "Cut (C)",
+    menuDelete: "Delete",
+    batchFill: (i, n, name) => `Batch ${i}/${n}: filling ${name} …`,
+    batchSubmitted: (i, n) => `Batch ${i}/${n}: submitted, waiting for that job to finish …`,
+    batchDone: (n) => `Batch finished ${n}/${n}`,
+    batchStopped: (done, total) => `Batch stopped (${done}/${total} done)`,
+    batchFailed: (done, total) => `Batch aborted (${done}/${total} done)`,
+    batchNoItems: "Nothing to batch run in the current view.",
+    batchConfirmAll: (n) => `Nothing is checked: run all ${n} images currently shown, one at a time?\n(the next one starts only after the previous job finished)`,
+    batchInterrupted: (message) => `Batch run aborted: ${message}`,
+    noSupported: "No supported media files.",
+    readOnlyRoot: "This root is read-only (output) — switch to input or 输入 before dropping.",
+    uploadSummary: (ok, skipped, failed, landing) => `Upload finished: ${ok} ok, ${skipped} skipped (already exists), ${failed} failed\nWritten to: ${landing}`,
+    virtualDelete: "「Recently uploaded / Recently used」 are aggregated views and cannot be deleted as a folder — switch to a real folder first.",
+    noMatch: "No matching media found in this folder.",
+    cutWithCount: (n) => `Cut (${n})`,
+    pasteWithCount: (n) => `Paste (${n})`,
+    copied: "Copied",
+    cutNoSelection: "Check the images to cut first (multi-select), or pick one from this folder in the node.",
+    copyPathPrompt: "Copy the folder path:",
+    copyAbsPrompt: "Copy the absolute path:",
+    deleteFileConfirm: (rel) => `Delete file?\n${rel}`,
+    deleteSelectedConfirm: (n, list) => `Delete ${n} selected file(s)?\n${list}`,
+    moveConfirm: (n, label) => `Move ${n} file(s) into "${label}"?`,
+    deleteResult: (ok, failedCount, list) => failedCount
+      ? `Deleted ${ok} file(s), ${failedCount} failed:\n${list}`
+      : `Deleted ${ok} file(s)`,
+    actionFailed: (label, message) => `${label} failed: ${message}`,
+    writeRootOnlyTip: "Only available in the input / 输入 roots",
+    folderDeleteDisabledTip: "Select a real folder first (the media root and the aggregated views cannot be deleted)",
+  },
+};
+
+let uiLocale = null;
+
+function detectLocale() {
+  const candidates = [];
+  try {
+    candidates.push(app?.ui?.settings?.getSettingValue?.("Comfy.Locale"));
+    candidates.push(app?.ui?.settings?.settingsValues?.["Comfy.Locale"]);
+    candidates.push(app?.ui?.settings?.settings?.["Comfy.Locale"]?.value);
+    candidates.push(app?.extensionManager?.setting?.get?.("Comfy.Locale"));
+  } catch {}
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (!/locale/i.test(key)) continue;
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        candidates.push(typeof parsed === "string" ? parsed : parsed && parsed.value);
+      } catch {
+        candidates.push(raw);
+      }
+    }
+  } catch {}
+  candidates.push(document.documentElement?.getAttribute?.("lang"));
+  candidates.push(navigator.language);
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !candidate) continue;
+    if (/^zh|chinese|中文/i.test(candidate)) return "zh";
+    if (/^en/i.test(candidate)) return "en";
+  }
+  return "en";
+}
+
+function t(key, ...args) {
+  if (!uiLocale) uiLocale = detectLocale();
+  const table = I18N[uiLocale] || I18N.en;
+  const entry = table[key] ?? I18N.en[key];
+  if (typeof entry === "function") return entry(...args);
+  return entry != null ? entry : key;
+}
+
 function widgetForNode(node) {
   const preferred = mediaModeForNode(node) === "video" ? ["video", "file"] : ["image", "file"];
   for (const name of preferred) {
@@ -215,8 +417,8 @@ function virtualFolderItems(data, folder, rootId = currentRoot) {
 }
 
 function virtualFolderLabel(folder) {
-  if (folder === RECENT_UPLOAD_ID) return "🕒 最近上传";
-  if (folder === RECENT_USED_ID) return "⭐ 最近使用";
+  if (folder === RECENT_UPLOAD_ID) return t("recentUpload");
+  if (folder === RECENT_USED_ID) return t("recentUsed");
   return String(folder || ".");
 }
 
@@ -363,46 +565,43 @@ function ensureDialog() {
     <div class="tm-dialog" role="dialog" aria-modal="true">
       <div class="tm-sidebar">
         <div class="tm-sidebar-top">
-          <select class="tm-btn tm-root-select" title="Media root"></select>
-          <input class="tm-search" type="search" placeholder="Search file or folder" />
+          <select class="tm-btn tm-root-select" title="${t("mediaRoot")}"></select>
+          <input class="tm-search" type="search" placeholder="${t("search")}" />
         </div>
         <div class="tm-folder-list"></div>
         <div class="tm-sidebar-footer">
-          <button class="tm-btn tm-upload-folder" title="Upload an entire folder (subfolders preserved)">Upload folder</button>
-          <button class="tm-btn tm-copy-path" title="Copy the absolute path of the selected folder">Copy path</button>
-          <button class="tm-btn tm-danger tm-folder-delete" title="Delete the selected folder and everything inside it">Delete folder</button>
+          <button class="tm-btn tm-upload-folder" title="${t("uploadFolderTip")}">${t("uploadFolder")}</button>
+          <button class="tm-btn tm-copy-path" title="${t("copyPathTip")}">${t("copyPath")}</button>
+          <button class="tm-btn tm-danger tm-folder-delete" title="${t("deleteFolderTip")}">${t("deleteFolder")}</button>
         </div>
       </div>
       <div class="tm-main">
         <div class="tm-head">
-          <button class="tm-btn tm-toggle tm-toggle-images active" type="button">Images</button>
-          <button class="tm-btn tm-toggle tm-toggle-videos active" type="button">Videos</button>
+          <button class="tm-btn tm-toggle tm-toggle-images active" type="button">${t("images")}</button>
+          <button class="tm-btn tm-toggle tm-toggle-videos active" type="button">${t("videos")}</button>
           <select class="tm-btn tm-sort">
-            <option value="date_desc">Date ↓</option>
-            <option value="date_asc">Date ↑</option>
-            <option value="name_asc">Name A–Z</option>
-            <option value="name_desc">Name Z–A</option>
+            <option value="date_desc">${t("sortDateDesc")}</option>
+            <option value="date_asc">${t("sortDateAsc")}</option>
+            <option value="name_asc">${t("sortNameAsc")}</option>
+            <option value="name_desc">${t("sortNameDesc")}</option>
           </select>
-          <button class="tm-btn tm-nav-prev" type="button" title="上一张放进节点（←）">‹</button>
-          <button class="tm-btn tm-nav-next" type="button" title="下一张放进节点（→）">›</button>
-          <button class="tm-btn tm-nav-random" type="button" title="随机一张放进节点（R）">🎲</button>
-          <button class="tm-btn tm-batch" type="button" title="按顺序逐张填入节点并排队：前一张跑完才提交下一张">▶ 批跑</button>
-          <button class="tm-btn tm-multi" title="Toggle multi-select mode (pick several files, then press Delete)">Multi</button>
-          <button class="tm-btn tm-upload" title="Upload multiple files to the input folder">Upload</button>
-          <button class="tm-btn tm-cut" title="Cut the selected file(s), then open a target folder and press Paste">Cut</button>
-          <button class="tm-btn tm-paste" disabled title="Move the cut file(s) into the current folder">Paste</button>
-          <button class="tm-btn tm-danger tm-delete" disabled title="Delete the selected files">Delete</button>
-          <button class="tm-btn tm-refresh">Refresh</button>
-          <button class="tm-btn tm-close">Close</button>
+          <button class="tm-btn tm-batch" type="button" title="${t("batchTip")}">${t("batch")}</button>
+          <button class="tm-btn tm-multi" title="${t("multiTip")}">${t("multi")}</button>
+          <button class="tm-btn tm-upload" title="${t("uploadTip")}">${t("upload")}</button>
+          <button class="tm-btn tm-cut" title="${t("cutTip")}">${t("cut")}</button>
+          <button class="tm-btn tm-paste" disabled title="${t("pasteTip")}">${t("paste")}</button>
+          <button class="tm-btn tm-danger tm-delete" disabled title="${t("deleteTip")}">${t("delete")}</button>
+          <button class="tm-btn tm-refresh">${t("refresh")}</button>
+          <button class="tm-btn tm-close">${t("close")}</button>
         </div>
         <div class="tm-grid"></div>
         <div class="tm-grid-status"></div>
       </div>
       <div class="tm-zoom">
         <div class="tm-zoom-media"></div>
-        <button class="tm-btn tm-zoom-nav prev" type="button" title="Previous">‹</button>
-        <button class="tm-btn tm-zoom-nav next" type="button" title="Next">›</button>
-        <div class="tm-zoom-bar"><span class="tm-zoom-count"></span><button class="tm-btn tm-zoom-close" type="button" title="Close">✕</button></div>
+        <button class="tm-btn tm-zoom-nav prev" type="button" title="${t("zoomPrev")}">‹</button>
+        <button class="tm-btn tm-zoom-nav next" type="button" title="${t("zoomNext")}">›</button>
+        <div class="tm-zoom-bar"><span class="tm-zoom-count"></span><button class="tm-btn tm-zoom-close" type="button" title="${t("close")}">✕</button></div>
       </div>
     </div>
   `;
@@ -423,9 +622,6 @@ function ensureDialog() {
   overlay.querySelector(".tm-zoom-nav.prev").addEventListener("click", () => stepZoom(-1));
   overlay.querySelector(".tm-zoom-nav.next").addEventListener("click", () => stepZoom(1));
   overlay.querySelector(".tm-zoom-close").addEventListener("click", closeZoom);
-  overlay.querySelector(".tm-nav-prev").addEventListener("click", () => stepFocused(-1, true));
-  overlay.querySelector(".tm-nav-next").addEventListener("click", () => stepFocused(1, true));
-  overlay.querySelector(".tm-nav-random").addEventListener("click", () => jumpRandom());
   overlay.querySelector(".tm-batch").addEventListener("click", () => { startBatchRun(); });
   // 面板外点击/右键：关掉右键菜单
   overlay.addEventListener("mousedown", (event) => {
@@ -603,7 +799,7 @@ async function uploadFileEntries(picked, buttonSelector = ".tm-upload") {
   const landing = topsList.length
     ? topsList.map((top) => `${rootId}/${top}/`).join(" , ")
     : `${rootId}${currentFolder === "." ? "/" : `/${normalizeFolder(currentFolder)}/`}`;
-  alert(`Upload finished: ${okCount} ok, ${skipCount} skipped (already exists), ${failCount} failed\n写入目录：${landing}`);
+  alert(t("uploadSummary", okCount, skipCount, failCount, landing));
   // 文件夹上传后把面板切到刚写入的顶层目录：否则用户看不到新图，
   // 再传一次就会叠成 <目录>/<目录>/（此前"散到两个文件夹"最可能的成因）
   if (topsList.length === 1 && normalizeFolder(currentFolder) !== topsList[0]) {
@@ -745,7 +941,7 @@ function enableDragDrop(overlayEl) {
     dragDepth = 0;
     setDragActive(false);
     if (!WRITE_ROOTS.includes(currentRoot || "input")) {
-      alert("当前根目录是只读的（output），请先切到 input 或 输入 再拖入。");
+      alert(t("readOnlyRoot"));
       return;
     }
     const dt = event.dataTransfer;
@@ -769,7 +965,7 @@ function enableDragDrop(overlayEl) {
       return allowed.includes(rel.slice(dot).toLowerCase());
     });
     if (!picked.length) {
-      alert("No supported media files dropped.");
+      alert(t("noSupported"));
       return;
     }
     await uploadFileEntries(picked, ".tm-upload");
@@ -809,8 +1005,8 @@ function updateFolderDeleteButton() {
   btn.disabled = isRoot || isVirtual;
   const rootId = currentRoot || "input";
   btn.title = isRoot || isVirtual
-    ? "Select a real folder first (the media root and the aggregated views cannot be deleted)"
-    : `Delete the selected folder and everything inside it (${rootId})`;
+    ? t("folderDeleteDisabledTip")
+    : `${t("deleteFolderTip")} (${rootId})`;
 }
 
 function updateRootActions() {
@@ -819,7 +1015,7 @@ function updateRootActions() {
     const btn = dialog?.querySelector(sel);
     if (!btn) continue;
     btn.disabled = !isWritable;
-    btn.title = isWritable ? (btn.dataset.tip || "Upload") : "Only available in the input / 输入 roots";
+    btn.title = isWritable ? (btn.dataset.tip || t("upload")) : t("writeRootOnlyTip");
   }
   updateFolderDeleteButton();
   updateDeleteButton();
@@ -840,17 +1036,17 @@ function cutCandidates() {
 function updateCutButtons() {
   const cut = dialog?.querySelector(".tm-cut");
   const paste = dialog?.querySelector(".tm-paste");
-  if (cut) cut.textContent = cutBuffer.length ? `Cut (${cutBuffer.length})` : "Cut";
+  if (cut) cut.textContent = cutBuffer.length ? t("cutWithCount", cutBuffer.length) : t("cut");
   if (paste) {
     paste.disabled = cutBuffer.length === 0;
-    paste.textContent = cutBuffer.length ? `Paste (${cutBuffer.length})` : "Paste";
+    paste.textContent = cutBuffer.length ? t("pasteWithCount", cutBuffer.length) : t("paste");
   }
 }
 
 function cutFiles() {
   const targets = cutCandidates();
   if (!targets.length) {
-    alert("先勾选要剪切的图片（Multi 模式），或先在节点里选中一张属于当前目录的图片。");
+    alert(t("cutNoSelection"));
     return;
   }
   cutBuffer = targets;
@@ -865,7 +1061,7 @@ async function pasteCutFiles() {
   const toRoot = currentRoot || "input";
   const toFolder = normalizeFolder(currentFolder);
   const label = `${toRoot}${toFolder === "." ? "" : "/" + toFolder}`;
-  if (!confirm(`Move ${cutBuffer.length} file(s) into "${label}"?`)) return;
+  if (!confirm(t("moveConfirm", cutBuffer.length, label))) return;
 
   const groups = new Map();
   for (const item of cutBuffer) {
@@ -892,7 +1088,7 @@ async function pasteCutFiles() {
     await refreshListingInPlace(true);
     if (failed.length) alert(`Moved ${moved} file(s), ${failed.length} failed:\n${failed.join("\n")}`);
   } catch (err) {
-    alert(`Paste failed: ${err.message || err}`);
+    alert(t("actionFailed", t("paste"), err.message || err));
   }
 }
 
@@ -914,12 +1110,12 @@ async function deleteSelected() {
   if (!selectedSet.size) return;
   const rootId = currentRoot || "input";
   const targets = Array.from(selectedSet);
-  if (!confirm(`Delete ${targets.length} selected file(s)?\n${targets.join("\n")}`)) return;
+  if (!confirm(t("deleteSelectedConfirm", targets.length, targets.join("\n")))) return;
   const { ok, failed } = await deleteMany(targets, rootId);
   for (const rel of ok) selectedSet.delete(rel);
   updateDeleteButton();
   await refreshListingInPlace(true);
-  const msg = `Deleted ${ok.length} file(s)` + (failed.length ? `, ${failed.length} failed:\n${failed.join("\n")}` : "");
+  const msg = t("deleteResult", ok.length, failed.length, failed.join("\n"));
   alert(msg);
 }
 
@@ -928,7 +1124,7 @@ async function deleteCurrentFolder() {
   const folder = normalizeFolder(currentFolder);
   if (folder === ".") return;
   if (isVirtualFolder(folder)) {
-    alert("「最近上传 / 最近使用」是聚合视图，不能整体删除；请先切到真实文件夹。");
+    alert(t("virtualDelete"));
     return;
   }
   const rootId = (currentRoot || "input").toLowerCase();
@@ -966,7 +1162,7 @@ async function deleteCurrentFolder() {
     const extra = payload.files != null ? ` (${payload.files} file(s))` : "";
     alert(`Deleted folder "${label}"${extra}`);
   } catch (err) {
-    alert(`Delete folder failed: ${err.message || err}`);
+    alert(t("actionFailed", t("deleteFolder"), err.message || err));
   } finally {
     updateFolderDeleteButton();
   }
@@ -1275,14 +1471,12 @@ function updateGridStatus() {
   const total = gridState.images.length;
   if (!total) return;
   const label = document.createElement("span");
-  label.textContent = gridState.rendered < total
-    ? `已加载 ${gridState.rendered} / ${total} 张（滚动自动加载更多；缩略图按需生成并缓存）`
-    : `${total} 张`;
+  label.textContent = gridState.rendered < total ? t("loadedOf", gridState.rendered, total) : t("countOf", total);
   status.appendChild(label);
   if (gridState.rendered < total && typeof gridAppendMore === "function") {
     const more = document.createElement("button");
     more.className = "tm-btn";
-    more.textContent = "载入更多";
+    more.textContent = t("loadMore");
     more.addEventListener("click", () => gridAppendMore && gridAppendMore());
     status.appendChild(more);
   }
@@ -1372,7 +1566,7 @@ function renderGrid() {
 
   const images = filteredImages();
   if (!images.length) {
-    grid.innerHTML = `<div class="tm-empty">No matching media found in this folder.</div>`;
+    grid.innerHTML = `<div class="tm-empty">${t("noMatch")}</div>`;
     updateGridStatus();
     return;
   }
@@ -1422,7 +1616,7 @@ function renderGrid() {
       actions.className = "tm-actions";
       const view = document.createElement("button");
       view.className = "tm-btn tm-view";
-      view.textContent = "View";
+      view.textContent = t("view");
       view.title = "Open the large preview";
       view.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -1432,14 +1626,14 @@ function renderGrid() {
       if (canDelete && WRITE_ROOTS.includes(item.root || "input")) {
         const del = document.createElement("button");
         del.className = "tm-btn tm-danger";
-        del.textContent = "Delete";
+        del.textContent = t("delete");
         del.addEventListener("click", async (event) => {
           event.stopPropagation();
-          if (!confirm(`Delete file?\n${item.relpath}`)) return;
+          if (!confirm(t("deleteFileConfirm", item.relpath))) return;
           try {
             await deleteImage(item.relpath, item.root || "input");
           } catch (err) {
-            alert(`Delete failed: ${err.message || err}`);
+            alert(t("actionFailed", t("delete"), err.message || err));
           }
         });
         actions.appendChild(del);
@@ -1571,7 +1765,7 @@ function revealCurrentCard() {
     if (status && !status.dataset.hint) {
       status.dataset.hint = "1";
       const hint = document.createElement("span");
-      hint.textContent = `（当前图在列表第 ${index + 1} 张，继续向下滚动或点「载入更多」）`;
+      hint.textContent = t("hintCurrent", index + 1);
       status.appendChild(hint);
     }
   }
@@ -1694,14 +1888,14 @@ function updateBatchButton() {
   if (!btn) return;
   if (batchRun) {
     btn.classList.add("active");
-    btn.textContent = `■ 停止 (${Math.min(batchRun.index + 1, batchRun.items.length)}/${batchRun.items.length})`;
-    btn.title = "停止：当前这张跑完就不再提交下一张";
+    btn.textContent = t("stopWithCount", Math.min(batchRun.index + 1, batchRun.items.length), batchRun.items.length);
+    btn.title = t("stopTip");
     return;
   }
   btn.classList.remove("active");
   const count = batchQueueItems().length;
-  btn.textContent = count ? `▶ 批跑 (${count})` : "▶ 批跑";
-  btn.title = "按顺序逐张填入节点并排队：前一张跑完才提交下一张；未勾选时批跑当前视图的全部图片";
+  btn.textContent = count ? t("batchWithCount", count) : t("batch");
+  btn.title = t("batchTip");
 }
 
 async function startBatchRun() {
@@ -1714,10 +1908,10 @@ async function startBatchRun() {
   if (!items.length) {
     const all = filteredImages().filter((item) => canSelectItem(item));
     if (!all.length) {
-      alert("当前视图没有可批跑的图片。");
+      alert(t("batchNoItems"));
       return;
     }
-    if (!confirm(`未勾选任何图片：按顺序批跑当前视图的全部 ${all.length} 张？\n（前一张跑完才提交下一张）`)) return;
+    if (!confirm(t("batchConfirmAll", all.length))) return;
     items = all;
   }
   const total = items.length;
@@ -1729,28 +1923,28 @@ async function startBatchRun() {
       if (batchRun.stop) break;
       batchRun.index = i;
       const item = items[i];
-      setBatchStatus(`批跑 ${i + 1}/${total}：填入 ${item.name} …`);
+      setBatchStatus(t("batchFill", i + 1, total, item.name));
       await setNodeMedia(currentNode, item, true);
       await sleep(BATCH_SUBMIT_GRACE_MS);
       if (batchRun.stop) break;
-      setBatchStatus(`批跑 ${i + 1}/${total}：已提交，等待该任务完成 …`);
+      setBatchStatus(t("batchSubmitted", i + 1, total));
       const promptId = await queueCurrentWorkflow();
       await waitForPromptResult(promptId);
       if (i < total - 1) await sleep(BATCH_GAP_MS);
     }
   } catch (err) {
     failure = err;
-    alert(`批跑中断：${err.message || err}`);
+    alert(t("batchInterrupted", err.message || err));
   } finally {
     const stopped = !!(batchRun && batchRun.stop);
     const doneCount = batchRun ? Math.min(batchRun.index + 1, total) : 0;
     batchRun = null;
     updateBatchButton();
     setBatchStatus(failure
-      ? `批跑中断（已跑 ${doneCount}/${total}）`
+      ? t("batchFailed", doneCount, total)
       : stopped
-        ? `批跑已停止（已跑 ${doneCount}/${total}）`
-        : `批跑完成 ${total}/${total}`);
+        ? t("batchStopped", doneCount, total)
+        : t("batchDone", total));
     setTimeout(() => {
       if (!batchRun) {
         batchStatusText = "";
@@ -1774,7 +1968,7 @@ async function copyItemAbsolutePath(item) {
   if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
   const sep = String(data.path).includes("\\") ? "\\" : "/";
   const full = String(data.path).endsWith(sep) ? `${data.path}${item.name}` : `${data.path}${sep}${item.name}`;
-  if (!(await copyTextToClipboard(full))) window.prompt("Copy the absolute path:", full);
+  if (!(await copyTextToClipboard(full))) window.prompt(t("copyAbsPrompt"), full);
 }
 
 function openContextMenu(event, item) {
@@ -1793,7 +1987,7 @@ function openContextMenu(event, item) {
       try {
         await handler();
       } catch (err) {
-        alert(`${label} failed: ${err.message || err}`);
+        alert(t("actionFailed", label, err.message || err));
       }
     });
     menu.appendChild(btn);
@@ -1804,14 +1998,14 @@ function openContextMenu(event, item) {
     menu.appendChild(line);
   };
 
-  if (canSelectItem(item)) addItem("设为节点图片（Enter）", () => setNodeMedia(currentNode, item));
-  addItem("预览（Space）", () => openZoom(item));
+  if (canSelectItem(item)) addItem(t("menuPick"), () => setNodeMedia(currentNode, item));
+  addItem(t("menuPreview"), () => openZoom(item));
   addSeparator();
-  addItem("复制文件名", async () => { if (!(await copyTextToClipboard(item.name))) window.prompt("Copy file name:", item.name); });
-  addItem("复制相对路径", async () => { if (!(await copyTextToClipboard(item.relpath))) window.prompt("Copy relative path:", item.relpath); });
-  addItem("复制绝对路径", () => copyItemAbsolutePath(item));
+  addItem(t("menuCopyName"), async () => { if (!(await copyTextToClipboard(item.name))) window.prompt("Copy file name:", item.name); });
+  addItem(t("menuCopyRel"), async () => { if (!(await copyTextToClipboard(item.relpath))) window.prompt("Copy relative path:", item.relpath); });
+  addItem(t("menuCopyAbs"), () => copyItemAbsolutePath(item));
   addSeparator();
-  addItem("剪切（C）", () => {
+  addItem(t("menuCut"), () => {
     cutBuffer = [{ root: rootId, relpath: item.relpath }];
     cutSet.clear();
     cutSet.add(`${rootId}:${item.relpath}`);
@@ -1819,8 +2013,8 @@ function openContextMenu(event, item) {
     renderGrid();
   });
   if (getSettingValue(SETTINGS.deleteEnabled, true) && WRITE_ROOTS.includes(rootId)) {
-    addItem("删除", async () => {
-      if (!confirm(`Delete file?\n${item.relpath}`)) return;
+    addItem(t("menuDelete"), async () => {
+      if (!confirm(t("deleteFileConfirm", item.relpath))) return;
       await deleteImage(item.relpath, rootId);
       await refreshListingInPlace(true);
     }, { danger: true });
@@ -1879,12 +2073,12 @@ async function copyCurrentFolderPath() {
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
     if (await copyTextToClipboard(data.path)) {
-      flashButtonLabel(btn, "Copied", "Copy path");
+      flashButtonLabel(btn, t("copied"), t("copyPath"));
     } else {
-      window.prompt("Copy the folder path:", data.path);
+      window.prompt(t("copyPathPrompt"), data.path);
     }
   } catch (err) {
-    alert(`Copy path failed: ${err.message || err}`);
+    alert(t("actionFailed", t("copyPath"), err.message || err));
   }
 }
 
@@ -2059,7 +2253,7 @@ function addBrowserButton(node) {
     };
     imageWidget.__tmWrappedCallback = true;
   }
-  const widget = node.addWidget?.("button", "Browse Media", null, async () => {
+  const widget = node.addWidget?.("button", t("browseMedia"), null, async () => {
     try {
       await openDialog(node, false);
     } catch (err) {
