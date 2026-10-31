@@ -46,6 +46,14 @@ let focusedIndex = -1; // 键盘/工具栏当前高亮的卡片（索引针对 f
 let rangeAnchor = -1; // Shift 连选锚点
 let lazyObserver = null; // 卡片缩略图懒加载
 let contextMenu = null; // 卡片右键菜单
+// 聚合视图（虚拟文件夹，纯前端，跨目录）
+const RECENT_UPLOAD_ID = "__recent_upload__";
+const RECENT_USED_ID = "__recent_used__";
+const RECENT_LIMIT = 200;
+const STORAGE_KEY_RECENT_USED = "thumbnailsModern.recentUsed";
+// 批跑状态：{ items, index, stop }；items 按当前网格顺序，逐张提交、前一张完成再提交下一张
+let batchRun = null;
+let batchStatusText = "";
 
 function getSettingValue(id, fallback) {
   try {
@@ -161,7 +169,55 @@ function rememberRoot(node, rootId) {
 
 function listImagesForFolder(data, folder, node = currentNode, rootId = currentRoot) {
   const normalized = normalizeFolder(folder);
+  const virtual = virtualFolderItems(data, normalized, rootId);
+  if (virtual) return virtual.filter((item) => canSelectItem(item, node));
   return (data?.images || []).filter((item) => item.folder === normalized && (!item.root || item.root === rootId) && canSelectItem(item, node));
+}
+
+// ---- 聚合视图：跨目录的「最近上传 / 最近使用」（不改后端，纯前端合成） ----
+function isVirtualFolder(folder) {
+  const value = String(folder || "");
+  return value === RECENT_UPLOAD_ID || value === RECENT_USED_ID;
+}
+
+function readRecentUsed(rootId) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(`${STORAGE_KEY_RECENT_USED}.${rootId}`) || "[]");
+    return Array.isArray(raw) ? raw.filter((entry) => entry && typeof entry.rel === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+// 「最近使用」= 这张图最近被写进节点的时刻（localStorage 记录，最多 RECENT_LIMIT 条）
+function rememberUsage(item) {
+  if (!item || !item.relpath) return;
+  const rootId = item.root || "input";
+  const key = `${STORAGE_KEY_RECENT_USED}.${rootId}`;
+  try {
+    const list = readRecentUsed(rootId).filter((entry) => entry.rel !== item.relpath);
+    list.unshift({ rel: item.relpath, ts: Date.now() });
+    localStorage.setItem(key, JSON.stringify(list.slice(0, RECENT_LIMIT)));
+  } catch {}
+}
+
+function virtualFolderItems(data, folder, rootId = currentRoot) {
+  if (!isVirtualFolder(folder) || !data) return null;
+  const all = (data.images || []).filter((item) => !item.root || item.root === rootId);
+  if (folder === RECENT_UPLOAD_ID) {
+    return all
+      .slice()
+      .sort((a, b) => Number(b.mtime_ns || 0) - Number(a.mtime_ns || 0) || String(b.name).localeCompare(String(a.name)))
+      .slice(0, RECENT_LIMIT);
+  }
+  const byRel = new Map(all.map((item) => [item.relpath, item]));
+  return readRecentUsed(rootId).map((entry) => byRel.get(entry.rel)).filter(Boolean).slice(0, RECENT_LIMIT);
+}
+
+function virtualFolderLabel(folder) {
+  if (folder === RECENT_UPLOAD_ID) return "🕒 最近上传";
+  if (folder === RECENT_USED_ID) return "⭐ 最近使用";
+  return String(folder || ".");
 }
 
 function updateWidgetChoicesForFolder(node, folder, data = currentData, opts = {}) {
@@ -260,6 +316,8 @@ function ensureStyles() {
     .tm-card.tm-focused{outline:2px dashed #4a9eff;outline-offset:2px}
     .tm-grid-status{padding:6px 14px;font-size:12px;opacity:.75;border-top:1px solid var(--border-color, #444);display:flex;gap:10px;align-items:center;min-height:20px}
     .tm-grid-status .tm-btn{padding:4px 8px;font-size:11px}
+    .tm-grid-status .tm-batch-status{opacity:1;color:#8fc7ff}
+    .tm-btn.active{border-color:#4a9eff;background:rgba(74,158,255,.18)}
     .tm-menu{position:fixed;z-index:10020;min-width:200px;background:var(--comfy-menu-bg, #1f1f1f);border:1px solid var(--border-color, #555);border-radius:10px;padding:4px;box-shadow:0 12px 40px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:2px}
     .tm-menu-item{text-align:left;border:0;background:transparent;color:inherit;border-radius:8px;padding:8px 10px;font-size:13px;cursor:pointer}
     .tm-menu-item:hover{background:rgba(255,255,255,.10)}
@@ -328,6 +386,7 @@ function ensureDialog() {
           <button class="tm-btn tm-nav-prev" type="button" title="上一张放进节点（←）">‹</button>
           <button class="tm-btn tm-nav-next" type="button" title="下一张放进节点（→）">›</button>
           <button class="tm-btn tm-nav-random" type="button" title="随机一张放进节点（R）">🎲</button>
+          <button class="tm-btn tm-batch" type="button" title="按顺序逐张填入节点并排队：前一张跑完才提交下一张">▶ 批跑</button>
           <button class="tm-btn tm-multi" title="Toggle multi-select mode (pick several files, then press Delete)">Multi</button>
           <button class="tm-btn tm-upload" title="Upload multiple files to the input folder">Upload</button>
           <button class="tm-btn tm-cut" title="Cut the selected file(s), then open a target folder and press Paste">Cut</button>
@@ -367,6 +426,7 @@ function ensureDialog() {
   overlay.querySelector(".tm-nav-prev").addEventListener("click", () => stepFocused(-1, true));
   overlay.querySelector(".tm-nav-next").addEventListener("click", () => stepFocused(1, true));
   overlay.querySelector(".tm-nav-random").addEventListener("click", () => jumpRandom());
+  overlay.querySelector(".tm-batch").addEventListener("click", () => { startBatchRun(); });
   // 面板外点击/右键：关掉右键菜单
   overlay.addEventListener("mousedown", (event) => {
     if (contextMenu && !contextMenu.contains(event.target)) closeContextMenu();
@@ -733,20 +793,23 @@ function toggleMultiSelect(force) {
 
 function updateDeleteButton() {
   const btn = dialog?.querySelector(".tm-delete");
-  if (!btn) return;
-  const count = multiSelect && WRITE_ROOTS.includes((currentRoot || "input")) ? selectedSet.size : 0;
-  btn.disabled = count === 0;
-  btn.textContent = count > 0 ? `Delete (${count})` : "Delete";
+  if (btn) {
+    const count = multiSelect && WRITE_ROOTS.includes((currentRoot || "input")) ? selectedSet.size : 0;
+    btn.disabled = count === 0;
+    btn.textContent = count > 0 ? `Delete (${count})` : "Delete";
+  }
+  updateBatchButton(); // 勾选数量变化时同步「批跑(N)」标签
 }
 
 function updateFolderDeleteButton() {
   const btn = dialog?.querySelector(".tm-folder-delete");
   if (!btn) return;
   const isRoot = normalizeFolder(currentFolder) === ".";
-  btn.disabled = isRoot;
+  const isVirtual = isVirtualFolder(currentFolder);
+  btn.disabled = isRoot || isVirtual;
   const rootId = currentRoot || "input";
-  btn.title = isRoot
-    ? "Select a folder first (the media root itself cannot be deleted)"
+  btn.title = isRoot || isVirtual
+    ? "Select a real folder first (the media root and the aggregated views cannot be deleted)"
     : `Delete the selected folder and everything inside it (${rootId})`;
 }
 
@@ -864,6 +927,10 @@ async function deleteSelected() {
 async function deleteCurrentFolder() {
   const folder = normalizeFolder(currentFolder);
   if (folder === ".") return;
+  if (isVirtualFolder(folder)) {
+    alert("「最近上传 / 最近使用」是聚合视图，不能整体删除；请先切到真实文件夹。");
+    return;
+  }
   const rootId = (currentRoot || "input").toLowerCase();
   const count = (currentData?.images || []).filter((item) => item.folder === folder || String(item.folder || "").startsWith(folder + "/")).length;
   const label = rootId === "input" ? folder : `${rootId}/${folder}`;
@@ -1059,6 +1126,7 @@ async function setNodeMedia(node, item, keepOpen = false) {
   const relpath = isItem ? item.relpath : String(item || "");
   const value = isItem ? itemValue(item) : String(item || "");
   const folder = isItem ? (item.folder || ".") : folderFromRelpath(relpath);
+  if (isItem) rememberUsage(item); // 「最近使用」聚合视图的数据源
   rememberFolder(node, folder);
   updateWidgetChoicesForFolder(node, folder, currentData);
   widget.value = value;
@@ -1089,17 +1157,23 @@ async function deleteImage(relpath, root = "input") {
 function filteredImages() {
   if (!currentData) return [];
   const sortMode = getSettingValue(SETTINGS.sortMode, "date_desc");
-  const items = currentData.images.filter((item) => {
+  const virtual = virtualFolderItems(currentData, normalizeFolder(currentFolder), currentRoot);
+  const items = (virtual || currentData.images).filter((item) => {
     const inRoot = !item.root || item.root === currentRoot;
     if (!inRoot) return false;
-    const inFolder = item.folder === currentFolder;
-    if (!inFolder) return false;
+    if (!virtual) {
+      const inFolder = item.folder === currentFolder;
+      if (!inFolder) return false;
+    }
     if (item.media_type === "image" && !currentShowImages) return false;
     if (item.media_type === "video" && !currentShowVideos) return false;
     if (!currentSearch) return true;
     const hay = `${item.name} ${item.relpath} ${item.folder}`.toLowerCase();
     return hay.includes(currentSearch);
   });
+
+  // 聚合视图自带顺序（最近上传按时间、最近使用按使用次序），不再套 sortMode
+  if (virtual) return items;
 
   items.sort((a, b) => {
     if (sortMode === "name_asc") return String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" });
@@ -1212,25 +1286,55 @@ function updateGridStatus() {
     more.addEventListener("click", () => gridAppendMore && gridAppendMore());
     status.appendChild(more);
   }
+  // 批跑进度（跨 renderGrid 保留，直到跑完/停止 8 秒后自动消失）
+  if (batchStatusText) {
+    const batch = document.createElement("span");
+    batch.className = "tm-batch-status";
+    batch.textContent = batchStatusText;
+    status.appendChild(batch);
+    if (batchRun) {
+      const stop = document.createElement("button");
+      stop.className = "tm-btn tm-batch-stop";
+      stop.textContent = "停止";
+      stop.addEventListener("click", () => {
+        if (batchRun) {
+          batchRun.stop = true;
+          updateBatchButton();
+        }
+      });
+      status.appendChild(stop);
+    }
+  }
 }
 
 function renderFolders() {
   const list = dialog.querySelector(".tm-folder-list");
   list.innerHTML = "";
+  const selectFolder = (path) => {
+    currentFolder = path;
+    rememberFolder(currentNode, currentFolder);
+    updateWidgetChoicesForFolder(currentNode, currentFolder, currentData);
+    renderFolders();
+    renderGrid();
+  };
+  const addRow = (path, label, count) => {
+    const el = document.createElement("div");
+    el.className = `tm-folder ${path === currentFolder ? "active" : ""}`;
+    const name = document.createElement("span");
+    name.textContent = label;
+    const num = document.createElement("span");
+    num.textContent = String(count ?? "");
+    el.append(name, num);
+    el.addEventListener("click", () => selectFolder(path));
+    list.appendChild(el);
+  };
+  // 聚合视图（跨目录，纯前端合成）：最近上传按 mtime、最近使用按写入节点的次序
+  addRow(RECENT_UPLOAD_ID, virtualFolderLabel(RECENT_UPLOAD_ID), (virtualFolderItems(currentData, RECENT_UPLOAD_ID, currentRoot) || []).length);
+  addRow(RECENT_USED_ID, virtualFolderLabel(RECENT_USED_ID), (virtualFolderItems(currentData, RECENT_USED_ID, currentRoot) || []).length);
   const folders = currentData?.folders || [];
   for (const folder of folders) {
     if (folder.root && folder.root !== currentRoot) continue;
-    const el = document.createElement("div");
-    el.className = `tm-folder ${folder.path === currentFolder ? "active" : ""}`;
-    el.innerHTML = `<span>${folder.label}</span><span>${folder.count}</span>`;
-    el.addEventListener("click", () => {
-      currentFolder = folder.path;
-      rememberFolder(currentNode, currentFolder);
-      updateWidgetChoicesForFolder(currentNode, currentFolder, currentData);
-      renderFolders();
-      renderGrid();
-    });
-    list.appendChild(el);
+    addRow(folder.path, folder.label, folder.count);
   }
   updateFolderDeleteButton();
 }
@@ -1501,6 +1605,161 @@ function jumpRandom() {
   }).catch(() => {});
 }
 
+// ---- 批跑：按顺序逐张填入节点并排队，**前一张真正跑完才提交下一张**（防多图同时吃显存） ----
+const BATCH_POLL_MS = 1500;
+const BATCH_GAP_MS = 600; // 上一张结束后到提交下一张之间的缓冲，给显存回收留时间
+const BATCH_SUBMIT_GRACE_MS = 400;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function batchQueueItems() {
+  return filteredImages().filter((item) => selectedSet.has(item.relpath) && canSelectItem(item));
+}
+
+async function queueCurrentWorkflow() {
+  if (typeof app?.graphToPrompt !== "function") {
+    throw new Error("当前 ComfyUI 前端没有 graphToPrompt，无法序列化工作流");
+  }
+  const serialized = await app.graphToPrompt();
+  if (!serialized || !serialized.output) throw new Error("工作流序列化失败");
+  const clientId = api.clientId || globalThis.crypto?.randomUUID?.() || `tm-${Date.now()}`;
+  const payload = { prompt: serialized.output, client_id: clientId };
+  if (serialized.workflow) payload.extra_data = { extra_pnginfo: { workflow: serialized.workflow } };
+  const response = await api.fetchApi("/prompt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.prompt_id) {
+    const detail = data?.error?.message || data?.error || data?.node_errors || `HTTP ${response.status}`;
+    throw new Error(`提交队列失败：${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  return data.prompt_id;
+}
+
+function executionErrorMessage(status) {
+  for (const entry of status?.messages || []) {
+    if (Array.isArray(entry) && entry[0] === "execution_error" && entry[1]) {
+      return entry[1].exception_message || entry[1].exception_type || "execution error";
+    }
+  }
+  return status?.status_str === "error" ? "execution error" : "";
+}
+
+// 等这张图的任务**真正结束**（历史里出现且 completed）；不是等它被排进队列
+async function waitForPromptResult(promptId) {
+  let idleStreak = 0;
+  for (;;) {
+    let entry = null;
+    try {
+      const response = await api.fetchApi(`/history/${promptId}`);
+      if (response.ok) {
+        const data = await response.json().catch(() => ({}));
+        entry = data && data[promptId];
+      }
+    } catch (err) {
+      console.warn("Thumbnails Modern: history poll failed", err);
+    }
+    if (entry) {
+      const status = entry.status || {};
+      const failure = executionErrorMessage(status);
+      if (failure) throw new Error(failure);
+      if (status.completed || status.status_str === "success") return entry;
+    }
+    let queued = true;
+    try {
+      const qr = await api.fetchApi("/queue");
+      const queue = qr.ok ? await qr.json().catch(() => ({})) : {};
+      const rows = [...(queue.queue_running || []), ...(queue.queue_pending || [])];
+      queued = rows.some((row) => Array.isArray(row) && row[1] === promptId);
+    } catch (err) {
+      console.warn("Thumbnails Modern: queue poll failed", err);
+    }
+    idleStreak = queued ? 0 : idleStreak + 1;
+    if (!queued && idleStreak >= 3) throw new Error("任务既不在队列也没有历史记录（可能被拒绝或中断）");
+    await sleep(BATCH_POLL_MS);
+  }
+}
+
+function setBatchStatus(text) {
+  batchStatusText = text || "";
+  updateGridStatus();
+}
+
+function updateBatchButton() {
+  const btn = dialog?.querySelector(".tm-batch");
+  if (!btn) return;
+  if (batchRun) {
+    btn.classList.add("active");
+    btn.textContent = `■ 停止 (${Math.min(batchRun.index + 1, batchRun.items.length)}/${batchRun.items.length})`;
+    btn.title = "停止：当前这张跑完就不再提交下一张";
+    return;
+  }
+  btn.classList.remove("active");
+  const count = batchQueueItems().length;
+  btn.textContent = count ? `▶ 批跑 (${count})` : "▶ 批跑";
+  btn.title = "按顺序逐张填入节点并排队：前一张跑完才提交下一张；未勾选时批跑当前视图的全部图片";
+}
+
+async function startBatchRun() {
+  if (batchRun) {
+    batchRun.stop = true;
+    updateBatchButton();
+    return;
+  }
+  let items = batchQueueItems();
+  if (!items.length) {
+    const all = filteredImages().filter((item) => canSelectItem(item));
+    if (!all.length) {
+      alert("当前视图没有可批跑的图片。");
+      return;
+    }
+    if (!confirm(`未勾选任何图片：按顺序批跑当前视图的全部 ${all.length} 张？\n（前一张跑完才提交下一张）`)) return;
+    items = all;
+  }
+  const total = items.length;
+  batchRun = { items, index: 0, stop: false };
+  updateBatchButton();
+  let failure = null;
+  try {
+    for (let i = 0; i < total; i++) {
+      if (batchRun.stop) break;
+      batchRun.index = i;
+      const item = items[i];
+      setBatchStatus(`批跑 ${i + 1}/${total}：填入 ${item.name} …`);
+      await setNodeMedia(currentNode, item, true);
+      await sleep(BATCH_SUBMIT_GRACE_MS);
+      if (batchRun.stop) break;
+      setBatchStatus(`批跑 ${i + 1}/${total}：已提交，等待该任务完成 …`);
+      const promptId = await queueCurrentWorkflow();
+      await waitForPromptResult(promptId);
+      if (i < total - 1) await sleep(BATCH_GAP_MS);
+    }
+  } catch (err) {
+    failure = err;
+    alert(`批跑中断：${err.message || err}`);
+  } finally {
+    const stopped = !!(batchRun && batchRun.stop);
+    const doneCount = batchRun ? Math.min(batchRun.index + 1, total) : 0;
+    batchRun = null;
+    updateBatchButton();
+    setBatchStatus(failure
+      ? `批跑中断（已跑 ${doneCount}/${total}）`
+      : stopped
+        ? `批跑已停止（已跑 ${doneCount}/${total}）`
+        : `批跑完成 ${total}/${total}`);
+    setTimeout(() => {
+      if (!batchRun) {
+        batchStatusText = "";
+        updateGridStatus();
+      }
+    }, 8000);
+  }
+}
+
 // ---- 卡片右键菜单 ----
 function closeContextMenu() {
   if (!contextMenu) return;
@@ -1738,12 +1997,14 @@ async function openDialog(node, refresh = false) {
 
   currentFolder = getRememberedFolder(node);
   const folderInCurrentRoot = (folder) => !folder.root || folder.root === currentRoot;
-  const hasFolder = (currentData?.folders || []).some((folder) => folder.path === currentFolder && folderInCurrentRoot(folder));
-  if (!hasFolder) {
-    currentFolder = folderFromRelpath(widgetForNode(node)?.value || ".") || ".";
+  if (!isVirtualFolder(currentFolder)) {
+    const hasFolder = (currentData?.folders || []).some((folder) => folder.path === currentFolder && folderInCurrentRoot(folder));
+    if (!hasFolder) {
+      currentFolder = folderFromRelpath(widgetForNode(node)?.value || ".") || ".";
+    }
+    const fallbackExists = (currentData?.folders || []).some((folder) => folder.path === currentFolder && folderInCurrentRoot(folder));
+    if (!fallbackExists) currentFolder = ".";
   }
-  const fallbackExists = (currentData?.folders || []).some((folder) => folder.path === currentFolder && folderInCurrentRoot(folder));
-  if (!fallbackExists) currentFolder = ".";
   rememberFolder(node, currentFolder);
   updateWidgetChoicesForFolder(node, currentFolder, currentData);
   currentSearch = "";
@@ -1760,6 +2021,7 @@ async function openDialog(node, refresh = false) {
   renderFolders();
   renderGrid();
   updateRootActions();
+  updateBatchButton();
   dialog.style.display = "flex";
   revealCurrentCard();
   // Auto refresh while dialog is open (keeps new uploads visible without manual Refresh)
