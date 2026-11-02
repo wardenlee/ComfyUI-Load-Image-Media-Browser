@@ -51,9 +51,14 @@ const RECENT_UPLOAD_ID = "__recent_upload__";
 const RECENT_USED_ID = "__recent_used__";
 const RECENT_LIMIT = 200;
 const STORAGE_KEY_RECENT_USED = "thumbnailsModern.recentUsed";
-// 批跑状态：{ items, index, stop }；items 按当前网格顺序，逐张提交、前一张完成再提交下一张
+// 批跑状态：{ items, index, done, total, repeat, stop }；items 按当前网格顺序，逐张提交、前一张完成再提交下一张
 let batchRun = null;
 let batchStatusText = "";
+let batchRepeat = 1; // 每张图连续跑几次（1–99）
+// 侧栏文件夹多选 / 剪切（批量删除、批量移动）
+const folderSelection = new Set();
+let folderAnchor = null;
+const cutFolderSet = new Set();
 
 function getSettingValue(id, fallback) {
   try {
@@ -76,8 +81,11 @@ const I18N = {
     sortNameDesc: "名称 Z–A",
     batch: "▶ 批跑",
     batchWithCount: (n) => `▶ 批跑 (${n})`,
+    batchWithCountRepeat: (n, repeat) => `▶ 批跑 (${n} 张 × ${repeat} 次)`,
     stopWithCount: (i, n) => `■ 停止 (${i}/${n})`,
     batchTip: "按顺序逐张填入节点并排队：前一张跑完才提交下一张；未勾选时批跑当前视图的全部图片",
+    repeatTip: "每张图连续跑几次（1–99）；工作流内部自带的 batch_size 照常生效，所以总数 = 选图 × 次数 × 内部 batch",
+    batchRepeatDetail: (r, repeat) => `（第 ${r}/${repeat} 次）`,
     stopTip: "停止：当前这张跑完就不再提交下一张",
     multi: "多选",
     multiTip: "切换多选模式（勾选多张后按「删除」）",
@@ -89,6 +97,11 @@ const I18N = {
     pasteTip: "把剪切的图片移动到当前文件夹",
     delete: "删除",
     deleteTip: "删除选中的图片",
+    deleteWithCount: (n) => `删除 (${n})`,
+    deleteFoldersConfirm: (n, list) => `删除选中的 ${n} 个文件夹及其全部内容？\n${list}`,
+    moveResult: (ok, failedCount, list) => failedCount ? `已移动 ${ok} 项，${failedCount} 项失败：\n${list}` : `已移动 ${ok} 项`,
+    folderMultiHint: "Ctrl / Shift 点击可多选文件夹（批量删除或剪切）",
+    deleteFolderConfirm: (label, count) => `删除文件夹「${label}」${count ? `及其内部 ${count} 个文件` : ""}？\n此操作不可撤销。`,
     refresh: "刷新",
     close: "关闭",
     mediaRoot: "媒体根目录",
@@ -116,8 +129,8 @@ const I18N = {
     menuCopyAbs: "复制绝对路径",
     menuCut: "剪切（C）",
     menuDelete: "删除",
-    batchFill: (i, n, name) => `批跑 ${i}/${n}：填入 ${name} …`,
-    batchSubmitted: (i, n) => `批跑 ${i}/${n}：已提交，等待该任务完成 …`,
+    batchFill: (i, n, name, detail = "") => `批跑 ${i}/${n}${detail}：填入 ${name} …`,
+    batchSubmitted: (i, n, detail = "") => `批跑 ${i}/${n}${detail}：已提交，等待该任务完成 …`,
     batchDone: (n) => `批跑完成 ${n}/${n}`,
     batchStopped: (done, total) => `批跑已停止（已跑 ${done}/${total}）`,
     batchFailed: (done, total) => `批跑中断（已跑 ${done}/${total}）`,
@@ -132,7 +145,7 @@ const I18N = {
     cutWithCount: (n) => `剪切 (${n})`,
     pasteWithCount: (n) => `粘贴 (${n})`,
     copied: "已复制",
-    cutNoSelection: "先勾选要剪切的图片（多选模式），或先在节点里选中一张属于当前目录的图片。",
+    cutNoSelection: "先勾选要剪切的文件/文件夹（多选卡片，或 Ctrl/Shift 点侧栏文件夹），或先在节点里选中一张属于当前目录的图片。",
     copyPathPrompt: "复制文件夹路径：",
     copyAbsPrompt: "复制绝对路径：",
     deleteFileConfirm: (rel) => `删除这个文件？\n${rel}`,
@@ -154,8 +167,11 @@ const I18N = {
     sortNameDesc: "Name Z–A",
     batch: "▶ Batch",
     batchWithCount: (n) => `▶ Batch (${n})`,
+    batchWithCountRepeat: (n, repeat) => `▶ Batch (${n} × ${repeat})`,
     stopWithCount: (i, n) => `■ Stop (${i}/${n})`,
     batchTip: "Fill the node and queue one image at a time: the next one is submitted only after the previous job finished; with nothing checked it runs everything currently shown",
+    repeatTip: "How many times each image runs (1–99); the workflow's own batch size still applies, so the total is images × runs × internal batch",
+    batchRepeatDetail: (r, repeat) => ` (run ${r}/${repeat})`,
     stopTip: "Stop: the current image finishes, no further one is submitted",
     multi: "Multi",
     multiTip: "Toggle multi-select mode (check several files, then press Delete)",
@@ -167,6 +183,11 @@ const I18N = {
     pasteTip: "Move the cut files into the current folder",
     delete: "Delete",
     deleteTip: "Delete the checked files",
+    deleteWithCount: (n) => `Delete (${n})`,
+    deleteFoldersConfirm: (n, list) => `Delete ${n} selected folder(s) and everything inside them?\n${list}`,
+    moveResult: (ok, failedCount, list) => failedCount ? `Moved ${ok}, ${failedCount} failed:\n${list}` : `Moved ${ok}`,
+    folderMultiHint: "Ctrl / Shift click to multi-select folders (batch delete or cut)",
+    deleteFolderConfirm: (label, count) => `Delete folder "${label}"${count ? ` and all ${count} file(s) inside` : ""}?\nThis cannot be undone.`,
     refresh: "Refresh",
     close: "Close",
     mediaRoot: "Media root",
@@ -194,8 +215,8 @@ const I18N = {
     menuCopyAbs: "Copy absolute path",
     menuCut: "Cut (C)",
     menuDelete: "Delete",
-    batchFill: (i, n, name) => `Batch ${i}/${n}: filling ${name} …`,
-    batchSubmitted: (i, n) => `Batch ${i}/${n}: submitted, waiting for that job to finish …`,
+    batchFill: (i, n, name, detail = "") => `Batch ${i}/${n}${detail}: filling ${name} …`,
+    batchSubmitted: (i, n, detail = "") => `Batch ${i}/${n}${detail}: submitted, waiting for that job to finish …`,
     batchDone: (n) => `Batch finished ${n}/${n}`,
     batchStopped: (done, total) => `Batch stopped (${done}/${total} done)`,
     batchFailed: (done, total) => `Batch aborted (${done}/${total} done)`,
@@ -210,7 +231,7 @@ const I18N = {
     cutWithCount: (n) => `Cut (${n})`,
     pasteWithCount: (n) => `Paste (${n})`,
     copied: "Copied",
-    cutNoSelection: "Check the images to cut first (multi-select), or pick one from this folder in the node.",
+    cutNoSelection: "Check the files/folders to cut first (multi-select cards, or Ctrl/Shift click sidebar folders), or pick one from this folder in the node.",
     copyPathPrompt: "Copy the folder path:",
     copyAbsPrompt: "Copy the absolute path:",
     deleteFileConfirm: (rel) => `Delete file?\n${rel}`,
@@ -519,6 +540,11 @@ function ensureStyles() {
     .tm-grid-status{padding:6px 14px;font-size:12px;opacity:.75;border-top:1px solid var(--border-color, #444);display:flex;gap:10px;align-items:center;min-height:20px}
     .tm-grid-status .tm-btn{padding:4px 8px;font-size:11px}
     .tm-grid-status .tm-batch-status{opacity:1;color:#8fc7ff}
+    .tm-repeat{display:inline-flex;align-items:center;gap:2px}
+    .tm-repeat .tm-btn{padding:4px 8px;line-height:1}
+    .tm-repeat-input{width:46px;box-sizing:border-box;text-align:center;border:1px solid var(--border-color, #555);background:var(--comfy-input-bg, #2c2c2c);color:inherit;border-radius:8px;padding:5px 4px}
+    .tm-folder.tm-selected{background:rgba(74,158,255,.16);box-shadow:inset 0 0 0 1px rgba(74,158,255,.55)}
+    .tm-folder.tm-drop-target{background:rgba(74,158,255,.28);outline:1px solid #4a9eff;outline-offset:-1px}
     .tm-btn.active{border-color:#4a9eff;background:rgba(74,158,255,.18)}
     .tm-menu{position:fixed;z-index:10020;min-width:200px;background:var(--comfy-menu-bg, #1f1f1f);border:1px solid var(--border-color, #555);border-radius:10px;padding:4px;box-shadow:0 12px 40px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:2px}
     .tm-menu-item{text-align:left;border:0;background:transparent;color:inherit;border-radius:8px;padding:8px 10px;font-size:13px;cursor:pointer}
@@ -586,6 +612,11 @@ function ensureDialog() {
             <option value="name_desc">${t("sortNameDesc")}</option>
           </select>
           <button class="tm-btn tm-batch" type="button" title="${t("batchTip")}">${t("batch")}</button>
+          <span class="tm-repeat" title="${t("repeatTip")}">
+            <button class="tm-btn tm-repeat-dec" type="button">−</button>
+            <input class="tm-repeat-input" type="number" min="1" max="99" step="1" value="1" />
+            <button class="tm-btn tm-repeat-inc" type="button">+</button>
+          </span>
           <button class="tm-btn tm-multi" title="${t("multiTip")}">${t("multi")}</button>
           <button class="tm-btn tm-upload" title="${t("uploadTip")}">${t("upload")}</button>
           <button class="tm-btn tm-cut" title="${t("cutTip")}">${t("cut")}</button>
@@ -623,6 +654,24 @@ function ensureDialog() {
   overlay.querySelector(".tm-zoom-nav.next").addEventListener("click", () => stepZoom(1));
   overlay.querySelector(".tm-zoom-close").addEventListener("click", closeZoom);
   overlay.querySelector(".tm-batch").addEventListener("click", () => { startBatchRun(); });
+  // 批跑次数：− / + 与输入框（1–99）
+  const repeatInput = overlay.querySelector(".tm-repeat-input");
+  const clampRepeat = (value) => {
+    const parsed = Math.round(Number(value));
+    return Number.isFinite(parsed) ? Math.max(1, Math.min(99, parsed)) : 1;
+  };
+  repeatInput.value = String(batchRepeat);
+  const setRepeat = (value) => {
+    batchRepeat = clampRepeat(value);
+    repeatInput.value = String(batchRepeat);
+    updateBatchButton();
+  };
+  overlay.querySelector(".tm-repeat-dec").addEventListener("click", () => setRepeat(batchRepeat - 1));
+  overlay.querySelector(".tm-repeat-inc").addEventListener("click", () => setRepeat(batchRepeat + 1));
+  repeatInput.addEventListener("change", () => setRepeat(repeatInput.value));
+  repeatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") setRepeat(repeatInput.value);
+  });
   // 面板外点击/右键：关掉右键菜单
   overlay.addEventListener("mousedown", (event) => {
     if (contextMenu && !contextMenu.contains(event.target)) closeContextMenu();
@@ -743,10 +792,17 @@ const UPLOAD_ACCEPT = ".png,.jpg,.jpeg,.webp,.gif,.bmp,.mp4,.webm,.mov,.m4v,.mkv
 // - 带相对路径的条目（上传文件夹 / 拖入文件夹）→ 直接用 rel 的目录部分：
 //   顶层目录 = 源文件夹名，固定落在当前根下，**不再叠加当前浏览的文件夹**
 // - 单个文件（多选上传 / 拖入文件）→ 仍落在当前浏览的文件夹，保持原有手感
-function uploadSubfolderFor(rel) {
+function uploadSubfolderFor(rel, base = null) {
   const relDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
-  if (relDir) return relDir;
-  return currentFolder === "." ? "" : normalizeFolder(currentFolder);
+  if (base === null || base === undefined) {
+    // 经典口径：文件夹树落在当前根下（顶层=源文件夹名），单个文件落在当前浏览的文件夹
+    if (relDir) return relDir;
+    return currentFolder === "." ? "" : normalizeFolder(currentFolder);
+  }
+  // 明确落点（例如拖到侧栏某个文件夹行上）：整棵树挂在该文件夹下
+  const baseFolder = normalizeFolder(base);
+  if (relDir) return baseFolder === "." ? relDir : `${baseFolder}/${relDir}`;
+  return baseFolder === "." ? "" : baseFolder;
 }
 
 function uploadTopFolder(subfolder) {
@@ -774,7 +830,7 @@ async function uploadOneFile(file, subfolder, idx, total, progressBtn) {
 }
 
 // ---- 按「相对路径」批量写入当前根（文件、文件夹、拖拽共用） ----
-async function uploadFileEntries(picked, buttonSelector = ".tm-upload") {
+async function uploadFileEntries(picked, buttonSelector = ".tm-upload", targetFolder = null) {
   const total = picked.length;
   if (!total) return { ok: 0, skipped: 0, failed: 0, tops: [] };
   const btn = dialog?.querySelector(buttonSelector);
@@ -786,7 +842,7 @@ async function uploadFileEntries(picked, buttonSelector = ".tm-upload") {
   for (let i = 0; i < total; i++) {
     const { rel, file } = picked[i];
     const carriesRelativeDir = rel.includes("/"); // 文件夹上传 / 拖入文件夹才有相对路径
-    const subfolder = uploadSubfolderFor(rel);
+    const subfolder = uploadSubfolderFor(rel, targetFolder);
     const result = await uploadOneFile(file, subfolder, i, total, btn);
     if (result.ok) okCount++;
     else if (result.skipped) skipCount++;
@@ -796,13 +852,14 @@ async function uploadFileEntries(picked, buttonSelector = ".tm-upload") {
   if (btn) btn.textContent = originalText;
   const rootId = currentRoot || "input";
   const topsList = [...tops].filter((top) => top && top !== ".").sort();
+  const landingFolder = targetFolder === null || targetFolder === undefined ? currentFolder : targetFolder;
   const landing = topsList.length
     ? topsList.map((top) => `${rootId}/${top}/`).join(" , ")
-    : `${rootId}${currentFolder === "." ? "/" : `/${normalizeFolder(currentFolder)}/`}`;
+    : `${rootId}${normalizeFolder(landingFolder) === "." ? "/" : `/${normalizeFolder(landingFolder)}/`}`;
   alert(t("uploadSummary", okCount, skipCount, failCount, landing));
-  // 文件夹上传后把面板切到刚写入的顶层目录：否则用户看不到新图，
-  // 再传一次就会叠成 <目录>/<目录>/（此前"散到两个文件夹"最可能的成因）
-  if (topsList.length === 1 && normalizeFolder(currentFolder) !== topsList[0]) {
+  // 文件夹上传后把面板切到刚写入的顶层目录（仅限"拖到面板"这种未指定落点的情况）：
+  // 否则用户看不到新图，再传一次就会叠成 <目录>/<目录>/
+  if ((targetFolder === null || targetFolder === undefined) && topsList.length === 1 && normalizeFolder(currentFolder) !== topsList[0]) {
     currentFolder = topsList[0];
     rememberFolder(currentNode, currentFolder);
   }
@@ -940,35 +997,7 @@ function enableDragDrop(overlayEl) {
     event.stopPropagation();
     dragDepth = 0;
     setDragActive(false);
-    if (!WRITE_ROOTS.includes(currentRoot || "input")) {
-      alert(t("readOnlyRoot"));
-      return;
-    }
-    const dt = event.dataTransfer;
-    if (!dt) return;
-    const allowed = UPLOAD_ACCEPT.split(",");
-    const entries = [];
-    for (const item of Array.from(dt.items || [])) {
-      if (item.kind !== "file") continue;
-      const entry = item.webkitGetAsEntry?.();
-      if (entry) entries.push(entry);
-    }
-    let picked = [];
-    if (entries.length) {
-      for (const entry of entries) await walkDroppedEntry(entry, "", picked);
-    } else {
-      picked = Array.from(dt.files || []).map((file) => ({ rel: file.name, file }));
-    }
-    picked = picked.filter(({ rel }) => {
-      const dot = rel.lastIndexOf(".");
-      if (dot < 0) return false;
-      return allowed.includes(rel.slice(dot).toLowerCase());
-    });
-    if (!picked.length) {
-      alert(t("noSupported"));
-      return;
-    }
-    await uploadFileEntries(picked, ".tm-upload");
+    await handleDroppedTransfer(event.dataTransfer, null);
   };
   overlayEl.addEventListener("dragover", onDragOver);
   overlayEl.addEventListener("dragenter", onDragEnter);
@@ -976,10 +1005,50 @@ function enableDragDrop(overlayEl) {
   overlayEl.addEventListener("drop", onDrop);
 }
 
+// 从拖拽数据里取出可上传的媒体条目（文件夹递归、保留相对路径）
+async function collectDroppedMedia(dt) {
+  const allowed = UPLOAD_ACCEPT.split(",");
+  const entries = [];
+  for (const item of Array.from(dt.items || [])) {
+    if (item.kind !== "file") continue;
+    const entry = item.webkitGetAsEntry?.();
+    if (entry) entries.push(entry);
+  }
+  let picked = [];
+  if (entries.length) {
+    for (const entry of entries) await walkDroppedEntry(entry, "", picked);
+  } else {
+    picked = Array.from(dt.files || []).map((file) => ({ rel: file.name, file }));
+  }
+  return picked.filter(({ rel }) => {
+    const dot = rel.lastIndexOf(".");
+    if (dot < 0) return false;
+    return allowed.includes(rel.slice(dot).toLowerCase());
+  });
+}
+
+// 拖入上传的统一入口。targetFolder 明确时（拖到侧栏某个文件夹行上）整棵树落在该文件夹下；
+// 否则沿用面板口径：文件夹树落在当前根下、单个文件落在当前浏览的文件夹。
+async function handleDroppedTransfer(dt, targetFolder = null) {
+  if (!dt) return;
+  if (!WRITE_ROOTS.includes(currentRoot || "input")) {
+    alert(t("readOnlyRoot"));
+    return;
+  }
+  const picked = await collectDroppedMedia(dt);
+  if (!picked.length) {
+    alert(t("noSupported"));
+    return;
+  }
+  await uploadFileEntries(picked, ".tm-upload", targetFolder);
+}
+
 // ---- Multi-select delete ----
 function toggleMultiSelect(force) {
   multiSelect = typeof force === "boolean" ? force : !multiSelect;
   if (!multiSelect) selectedSet.clear();
+  folderSelection.clear();
+  folderAnchor = null;
   rangeAnchor = -1;
   const multiBtn = dialog?.querySelector(".tm-multi");
   if (multiBtn) multiBtn.classList.toggle("active", multiSelect);
@@ -990,9 +1059,10 @@ function toggleMultiSelect(force) {
 function updateDeleteButton() {
   const btn = dialog?.querySelector(".tm-delete");
   if (btn) {
-    const count = multiSelect && WRITE_ROOTS.includes((currentRoot || "input")) ? selectedSet.size : 0;
+    const fileCount = multiSelect && WRITE_ROOTS.includes((currentRoot || "input")) ? selectedSet.size : 0;
+    const count = folderSelection.size || fileCount;
     btn.disabled = count === 0;
-    btn.textContent = count > 0 ? `Delete (${count})` : "Delete";
+    btn.textContent = count > 0 ? t("deleteWithCount", count) : t("delete");
   }
   updateBatchButton(); // 勾选数量变化时同步「批跑(N)」标签
 }
@@ -1022,9 +1092,11 @@ function updateRootActions() {
   updateCutButtons();
 }
 
-// ---- Cut / paste (move files between folders / roots) ----
+// ---- Cut / paste (move files or whole folders between folders / roots) ----
 function cutCandidates() {
   const rootId = currentRoot || "input";
+  // 侧栏多选的文件夹优先（可整目录搬走）
+  if (folderSelection.size) return [...folderSelection].map((relpath) => ({ root: rootId, relpath, folder: true }));
   if (selectedSet.size) return [...selectedSet].map((relpath) => ({ root: rootId, relpath }));
   const value = widgetForNode(currentNode)?.value || "";
   const plain = stripAnnotation(value);
@@ -1051,8 +1123,13 @@ function cutFiles() {
   }
   cutBuffer = targets;
   cutSet.clear();
-  for (const target of targets) cutSet.add(`${target.root}:${target.relpath}`);
+  cutFolderSet.clear();
+  for (const target of targets) {
+    if (target.folder) cutFolderSet.add(target.relpath);
+    else cutSet.add(`${target.root}:${target.relpath}`);
+  }
   updateCutButtons();
+  renderFolders();
   renderGrid();
 }
 
@@ -1084,9 +1161,13 @@ async function pasteCutFiles() {
     }
     cutBuffer = [];
     cutSet.clear();
+    cutFolderSet.clear();
+    folderSelection.clear();
     updateCutButtons();
+    renderFolders();
     await refreshListingInPlace(true);
-    if (failed.length) alert(`Moved ${moved} file(s), ${failed.length} failed:\n${failed.join("\n")}`);
+    if (failed.length) alert(t("moveResult", moved, failed.length, failed.join("\n")));
+    else if (moved) alert(t("moveResult", moved, 0, ""));
   } catch (err) {
     alert(t("actionFailed", t("paste"), err.message || err));
   }
@@ -1106,7 +1187,44 @@ async function deleteMany(relpaths, root = "input") {
   return { ok, failed };
 }
 
+async function deleteSelectedFolders() {
+  const rootId = (currentRoot || "input").toLowerCase();
+  const folders = [...folderSelection].sort();
+  if (!confirm(t("deleteFoldersConfirm", folders.length, folders.join("\n")))) return;
+  let ok = 0;
+  const failed = [];
+  for (const folder of folders) {
+    try {
+      const response = await api.fetchApi("/thumbnails-modern/delete_folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ relpath: folder, root: rootId }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      ok += 1;
+    } catch (err) {
+      failed.push(`${folder} (${err.message || err})`);
+    }
+  }
+  folderSelection.clear();
+  folderAnchor = null;
+  await refreshListingInPlace(true);
+  // 刷新后（currentData 已是新列表）再判断当前浏览的文件夹是否还在
+  if (normalizeFolder(currentFolder) !== "." && !(currentData?.folders || []).some((folder) => folder.path === currentFolder)) {
+    currentFolder = ".";
+    rememberFolder(currentNode, currentFolder);
+    renderFolders();
+    renderGrid();
+  }
+  alert(t("deleteResult", ok, failed.length, failed.join("\n")));
+}
+
 async function deleteSelected() {
+  if (folderSelection.size) {
+    await deleteSelectedFolders();
+    return;
+  }
   if (!selectedSet.size) return;
   const rootId = currentRoot || "input";
   const targets = Array.from(selectedSet);
@@ -1130,7 +1248,7 @@ async function deleteCurrentFolder() {
   const rootId = (currentRoot || "input").toLowerCase();
   const count = (currentData?.images || []).filter((item) => item.folder === folder || String(item.folder || "").startsWith(folder + "/")).length;
   const label = rootId === "input" ? folder : `${rootId}/${folder}`;
-  if (!confirm(`Delete folder "${label}"${count ? ` and all ${count} file(s) inside` : ""}?\nThis cannot be undone.`)) return;
+  if (!confirm(t("deleteFolderConfirm", label, count))) return;
 
   const btn = dialog?.querySelector(".tm-folder-delete");
   if (btn) btn.disabled = true;
@@ -1504,6 +1622,8 @@ function updateGridStatus() {
 function renderFolders() {
   const list = dialog.querySelector(".tm-folder-list");
   list.innerHTML = "";
+  const folders = currentData?.folders || [];
+  const realFolderPaths = folders.filter((folder) => !folder.root || folder.root === currentRoot).map((folder) => folder.path);
   const selectFolder = (path) => {
     currentFolder = path;
     rememberFolder(currentNode, currentFolder);
@@ -1512,25 +1632,80 @@ function renderFolders() {
     renderGrid();
   };
   const addRow = (path, label, count) => {
+    const virtual = isVirtualFolder(path);
     const el = document.createElement("div");
     el.className = `tm-folder ${path === currentFolder ? "active" : ""}`;
+    if (!virtual && folderSelection.has(path)) el.classList.add("tm-selected");
+    if (!virtual && cutFolderSet.has(path)) el.classList.add("tm-cut");
+    if (!virtual) el.title = t("folderMultiHint");
     const name = document.createElement("span");
     name.textContent = label;
     const num = document.createElement("span");
     num.textContent = String(count ?? "");
     el.append(name, num);
-    el.addEventListener("click", () => selectFolder(path));
+    el.addEventListener("click", (event) => {
+      selectedSet.clear(); // 文件与文件夹的选择互斥，Delete/剪切 只作用于当前聚焦的那一类
+      if (virtual) {
+        folderSelection.clear();
+        folderAnchor = null;
+        selectFolder(path);
+        return;
+      }
+      if (event.ctrlKey || event.metaKey) {
+        if (folderSelection.has(path)) folderSelection.delete(path);
+        else folderSelection.add(path);
+        folderAnchor = path;
+        selectFolder(path);
+        return;
+      }
+      if (event.shiftKey && folderAnchor && realFolderPaths.includes(folderAnchor)) {
+        const from = realFolderPaths.indexOf(folderAnchor);
+        const to = realFolderPaths.indexOf(path);
+        if (from >= 0 && to >= 0) {
+          for (let i = Math.min(from, to); i <= Math.max(from, to); i++) folderSelection.add(realFolderPaths[i]);
+        }
+        selectFolder(path);
+        return;
+      }
+      folderSelection.clear();
+      folderAnchor = path;
+      selectFolder(path);
+    });
+    // 拖到某一行上 = 上传进这个文件夹（整棵树挂在该文件夹下）
+    if (!virtual) {
+      el.addEventListener("dragenter", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        el.classList.add("tm-drop-target");
+      });
+      el.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        el.classList.add("tm-drop-target");
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      });
+      el.addEventListener("dragleave", () => el.classList.remove("tm-drop-target"));
+      el.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        el.classList.remove("tm-drop-target");
+        await handleDroppedTransfer(event.dataTransfer, path);
+      });
+    }
     list.appendChild(el);
   };
   // 聚合视图（跨目录，纯前端合成）：最近上传按 mtime、最近使用按写入节点的次序
   addRow(RECENT_UPLOAD_ID, virtualFolderLabel(RECENT_UPLOAD_ID), (virtualFolderItems(currentData, RECENT_UPLOAD_ID, currentRoot) || []).length);
   addRow(RECENT_USED_ID, virtualFolderLabel(RECENT_USED_ID), (virtualFolderItems(currentData, RECENT_USED_ID, currentRoot) || []).length);
-  const folders = currentData?.folders || [];
   for (const folder of folders) {
     if (folder.root && folder.root !== currentRoot) continue;
     addRow(folder.path, folder.label, folder.count);
   }
+  // 目录被外部删掉时清掉残留选择
+  for (const path of [...folderSelection]) if (!realFolderPaths.includes(path)) folderSelection.delete(path);
   updateFolderDeleteButton();
+  updateDeleteButton();
+  updateCutButtons();
 }
 
 function renderGrid() {
@@ -1686,6 +1861,11 @@ function setFocused(index, scroll = false) {
 
 function handleCardClick(item, index, event) {
   event?.stopPropagation?.();
+  if (folderSelection.size) {
+    folderSelection.clear();
+    folderAnchor = null;
+    renderFolders();
+  }
   setFocused(index, false);
   const images = gridState.images;
   // Shift+点击：#1 进入多选并选中该卡（设为锚点），#2 起选中锚点与当前卡之间全部
@@ -1886,15 +2066,21 @@ function setBatchStatus(text) {
 function updateBatchButton() {
   const btn = dialog?.querySelector(".tm-batch");
   if (!btn) return;
-  if (batchRun) {
+  const running = !!batchRun;
+  for (const sel of [".tm-repeat-dec", ".tm-repeat-inc", ".tm-repeat-input"]) {
+    const control = dialog?.querySelector(sel);
+    if (control) control.disabled = running;
+  }
+  if (running) {
     btn.classList.add("active");
-    btn.textContent = t("stopWithCount", Math.min(batchRun.index + 1, batchRun.items.length), batchRun.items.length);
+    btn.textContent = t("stopWithCount", Math.min(batchRun.done || 0, batchRun.total || 1), batchRun.total || 1);
     btn.title = t("stopTip");
     return;
   }
   btn.classList.remove("active");
   const count = batchQueueItems().length;
-  btn.textContent = count ? t("batchWithCount", count) : t("batch");
+  const repeat = Math.max(1, Math.min(99, Number(batchRepeat) || 1));
+  btn.textContent = !count ? t("batch") : repeat > 1 ? t("batchWithCountRepeat", count, repeat) : t("batchWithCount", count);
   btn.title = t("batchTip");
 }
 
@@ -1914,30 +2100,41 @@ async function startBatchRun() {
     if (!confirm(t("batchConfirmAll", all.length))) return;
     items = all;
   }
-  const total = items.length;
-  batchRun = { items, index: 0, stop: false };
+  const repeat = Math.max(1, Math.min(99, Number(batchRepeat) || 1));
+  const total = items.length * repeat;
+  batchRun = { items, index: 0, done: 0, total, repeat, stop: false };
   updateBatchButton();
   let failure = null;
   try {
-    for (let i = 0; i < total; i++) {
-      if (batchRun.stop) break;
-      batchRun.index = i;
+    for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      setBatchStatus(t("batchFill", i + 1, total, item.name));
-      await setNodeMedia(currentNode, item, true);
-      await sleep(BATCH_SUBMIT_GRACE_MS);
+      for (let r = 0; r < repeat; r++) {
+        if (batchRun.stop) break;
+        batchRun.index = i;
+        const detail = repeat > 1 ? t("batchRepeatDetail", r + 1, repeat) : "";
+        const position = batchRun.done + 1;
+        setBatchStatus(t("batchFill", position, total, item.name, detail));
+        if (r === 0) {
+          // 同一张图重复跑时不必重复写节点值
+          await setNodeMedia(currentNode, item, true);
+          await sleep(BATCH_SUBMIT_GRACE_MS);
+        }
+        if (batchRun.stop) break;
+        setBatchStatus(t("batchSubmitted", position, total, detail));
+        const promptId = await queueCurrentWorkflow();
+        await waitForPromptResult(promptId);
+        batchRun.done += 1;
+        updateBatchButton();
+        if (batchRun.done < total) await sleep(BATCH_GAP_MS);
+      }
       if (batchRun.stop) break;
-      setBatchStatus(t("batchSubmitted", i + 1, total));
-      const promptId = await queueCurrentWorkflow();
-      await waitForPromptResult(promptId);
-      if (i < total - 1) await sleep(BATCH_GAP_MS);
     }
   } catch (err) {
     failure = err;
     alert(t("batchInterrupted", err.message || err));
   } finally {
     const stopped = !!(batchRun && batchRun.stop);
-    const doneCount = batchRun ? Math.min(batchRun.index + 1, total) : 0;
+    const doneCount = batchRun ? batchRun.done : 0;
     batchRun = null;
     updateBatchButton();
     setBatchStatus(failure
@@ -2206,6 +2403,9 @@ async function openDialog(node, refresh = false) {
   currentShowVideos = true;
   multiSelect = false;
   selectedSet.clear();
+  folderSelection.clear();
+  folderAnchor = null;
+  cutFolderSet.clear();
   const multiBtn = dialog.querySelector(".tm-multi");
   if (multiBtn) multiBtn.classList.remove("active");
   updateDeleteButton();

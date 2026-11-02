@@ -856,7 +856,7 @@ def _unique_dest(dest: Path) -> Path:
 
 
 def _move_files(from_root: str, relpaths, to_root: str, to_folder: str) -> Dict[str, object]:
-    """Move files (cut/paste) inside or between the media roots."""
+    """Move files **or whole folders** (cut/paste) inside or between the media roots."""
     try:
         src_root = _root_dir(from_root)
         dst_root = _root_dir(to_root)
@@ -880,11 +880,20 @@ def _move_files(from_root: str, relpaths, to_root: str, to_folder: str) -> Dict[
             src = (src_root / rel).resolve()
             if src_root != src and src_root not in src.parents:
                 raise ValueError("Source is outside the media root")
-            if not src.is_file():
-                raise ValueError("Source is not a file")
+            if src.is_symlink():
+                raise ValueError("Symbolic links are not moved")
+            is_dir = src.is_dir()
+            if not is_dir and not src.is_file():
+                raise ValueError("Source is neither a file nor a folder")
+            if is_dir:
+                # 目录移动要防两种自吞：移到自身、或移到自己的子目录里
+                if src == dst_dir or dst_dir == src or src in dst_dir.parents:
+                    raise ValueError("Cannot move a folder into itself or its own subfolder")
+                if src.parent.as_posix() == dst_dir.as_posix():
+                    raise ValueError("Folder is already in that folder")
             dest = _unique_dest(dst_dir / src.name)
             shutil.move(str(src), str(dest))
-            moved.append({"from": rel, "to": dest.relative_to(dst_root).as_posix()})
+            moved.append({"from": rel, "to": dest.relative_to(dst_root).as_posix(), "folder": is_dir})
         except Exception as exc:
             failed.append(f"{relpath}: {exc}")
 
@@ -892,6 +901,10 @@ def _move_files(from_root: str, relpaths, to_root: str, to_folder: str) -> Dict[
         for item in moved:
             _invalidate_dir(from_root, Path(item["from"]).parent.as_posix())
             _invalidate_dir(to_root, Path(item["to"]).parent.as_posix())
+            if item.get("folder"):
+                # 目录整体挪走/挪入：顶层祖先目录的条目也要重扫
+                _invalidate_dir(from_root, item["from"])
+                _invalidate_dir(to_root, item["to"])
         _scan_input_tree(force=True)
     return {"ok": True, "moved": moved, "failed": failed}
 
