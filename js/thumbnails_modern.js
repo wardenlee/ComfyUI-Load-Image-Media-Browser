@@ -126,6 +126,8 @@ const I18N = {
     copyPathTip: "复制所选文件夹的绝对路径",
     deleteFolder: "删除文件夹",
     deleteFolderTip: "删除所选文件夹及其全部内容",
+    deleteFolderWithCount: (n) => `删除文件夹 (${n})`,
+    deleteFoldersTip: (n) => `删除选中的 ${n} 个文件夹及其全部内容`,
     recentUpload: "🕒 最近上传",
     recentUsed: "⭐ 最近使用",
     view: "查看",
@@ -222,6 +224,8 @@ const I18N = {
     copyPathTip: "Copy the absolute path of the selected folder",
     deleteFolder: "Delete folder",
     deleteFolderTip: "Delete the selected folder and everything inside it",
+    deleteFolderWithCount: (n) => `Delete folder (${n})`,
+    deleteFoldersTip: (n) => `Delete the ${n} selected folders and everything inside them`,
     recentUpload: "🕒 Recently uploaded",
     recentUsed: "⭐ Recently used",
     view: "View",
@@ -1182,9 +1186,18 @@ function updateDeleteButton() {
 function updateFolderDeleteButton() {
   const btn = dialog?.querySelector(".tm-folder-delete");
   if (!btn) return;
+  const picked = folderSelection.size;
+  if (picked) {
+    // 多选文件夹时：这个按钮改为删除全部选中项，并显示数量
+    btn.disabled = false;
+    btn.textContent = t("deleteFolderWithCount", picked);
+    btn.title = t("deleteFoldersTip", picked);
+    return;
+  }
   const isRoot = normalizeFolder(currentFolder) === ".";
   const isVirtual = isVirtualFolder(currentFolder);
   btn.disabled = isRoot || isVirtual;
+  btn.textContent = t("deleteFolder");
   const rootId = currentRoot || "input";
   btn.title = isRoot || isVirtual
     ? t("folderDeleteDisabledTip")
@@ -1359,6 +1372,11 @@ async function deleteSelected() {
 
 // ---- Delete the whole selected folder (sidebar bottom button) ----
 async function deleteCurrentFolder() {
+  // 有选中的文件夹时，「删除文件夹」= 删除**全部选中项**（与顶部「删除」同口径）
+  if (folderSelection.size) {
+    await deleteSelectedFolders();
+    return;
+  }
   const folder = normalizeFolder(currentFolder);
   if (folder === ".") return;
   if (isVirtualFolder(folder)) {
