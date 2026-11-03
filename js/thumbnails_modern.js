@@ -102,7 +102,7 @@ const I18N = {
     deleteWithCount: (n) => `删除 (${n})`,
     deleteFoldersConfirm: (n, list) => `删除选中的 ${n} 个文件夹及其全部内容？\n${list}`,
     moveResult: (ok, failedCount, list) => failedCount ? `已移动 ${ok} 项，${failedCount} 项失败：\n${list}` : `已移动 ${ok} 项`,
-    folderMultiHint: "Ctrl / Shift 点击可多选文件夹（批量删除或剪切）",
+    folderMultiHint: "点击文件夹=选中，再点=取消；Ctrl 逐个、Shift 区间；选中后可下载 / 删除 / 剪切",
     deleteFolderConfirm: (label, count) => `删除文件夹「${label}」${count ? `及其内部 ${count} 个文件` : ""}？\n此操作不可撤销。`,
     refresh: "刷新",
     close: "关闭",
@@ -113,6 +113,8 @@ const I18N = {
     uploadFolder: "上传文件夹",
     uploadFolderTip: "上传整个文件夹（保留子目录结构）",
     download: "下载",
+    downloadWithCount: (n) => `下载 (${n})`,
+    downloadSelectionTip: (n) => `下载选中的 ${n} 项（文件夹自动打包成 zip）`,
     downloadTip: "下载选中的文件（多选自动打包成 zip；未勾选则下载节点当前图）",
     downloadFolder: "下载文件夹",
     downloadFolderTip: "把当前文件夹整体打包成 zip 下载",
@@ -194,7 +196,7 @@ const I18N = {
     deleteWithCount: (n) => `Delete (${n})`,
     deleteFoldersConfirm: (n, list) => `Delete ${n} selected folder(s) and everything inside them?\n${list}`,
     moveResult: (ok, failedCount, list) => failedCount ? `Moved ${ok}, ${failedCount} failed:\n${list}` : `Moved ${ok}`,
-    folderMultiHint: "Ctrl / Shift click to multi-select folders (batch delete or cut)",
+    folderMultiHint: "Click a folder to select it, click again to deselect; Ctrl toggles, Shift selects a range; the selection feeds Download / Delete / Cut",
     deleteFolderConfirm: (label, count) => `Delete folder "${label}"${count ? ` and all ${count} file(s) inside` : ""}?\nThis cannot be undone.`,
     refresh: "Refresh",
     close: "Close",
@@ -205,6 +207,8 @@ const I18N = {
     uploadFolder: "Upload folder",
     uploadFolderTip: "Upload an entire folder (subfolders preserved)",
     download: "Download",
+    downloadWithCount: (n) => `Download (${n})`,
+    downloadSelectionTip: (n) => `Download the ${n} checked item(s) — folders are zipped`,
     downloadTip: "Download the checked files (several are zipped; without a selection the node's current image is downloaded)",
     downloadFolder: "Download folder",
     downloadFolderTip: "Download the whole current folder as one zip",
@@ -706,6 +710,10 @@ function ensureDialog() {
   overlay.querySelector(".tm-root-select").addEventListener("change", (event) => {
     currentRoot = event.target.value || "input";
     currentFolder = ".";
+    // 文件夹/文件选择都是"根内相对路径"，换根必须清空，否则会指向错的目录
+    folderSelection.clear();
+    folderAnchor = null;
+    selectedSet.clear();
     rememberRoot(currentNode, currentRoot);
     rememberFolder(currentNode, currentFolder);
     updateRootActions();
@@ -1065,16 +1073,28 @@ async function handleDroppedTransfer(dt, targetFolder = null) {
   await uploadFileEntries(picked, ".tm-upload", targetFolder);
 }
 
-// ---- 下载：单文件直下；多文件/整目录由后端打包成 zip（只读根上替代「上传」按钮） ----
+// ---- 下载：单文件直下；多文件/多文件夹/整目录由后端打包成 zip（只读根上替代「上传」按钮） ----
 function downloadTargets() {
   const rootId = currentRoot || "input";
-  if (selectedSet.size) return [...selectedSet];
+  // 文件夹多选与文件多选互斥，但两者都指"选中项"；后端收到目录会自动递归打包
+  const picked = [...folderSelection, ...selectedSet];
+  if (picked.length) return picked;
   const value = widgetForNode(currentNode)?.value || "";
   const plain = stripAnnotation(value);
   const valueRoot = annotationOf(value) || "input";
   if (plain && valueRoot === rootId) return [plain];
   const item = focusedItem();
   return item && (item.root || "input") === rootId ? [item.relpath] : [];
+}
+
+// 只读根上「下载」按钮的文案：带上选中数量，让人一眼看到这次会下载什么
+function updateDownloadButton() {
+  if (WRITE_ROOTS.includes(currentRoot || "input")) return; // 可写根那个位置是「上传」，由 updateRootActions 管
+  const btn = dialog?.querySelector(".tm-upload");
+  if (!btn) return;
+  const count = downloadTargets().length;
+  btn.textContent = count ? t("downloadWithCount", count) : t("download");
+  btn.title = count ? t("downloadSelectionTip", count) : t("downloadTip");
 }
 
 function startBrowserDownload(url) {
@@ -1134,6 +1154,7 @@ function updateDeleteButton() {
     btn.textContent = count > 0 ? t("deleteWithCount", count) : t("delete");
   }
   updateBatchButton(); // 勾选数量变化时同步「批跑(N)」标签
+  updateDownloadButton(); // 只读根上的「下载(N)」也要跟着选中数量走
 }
 
 function updateFolderDeleteButton() {
@@ -1166,6 +1187,7 @@ function updateRootActions() {
   updateFolderDeleteButton();
   updateDeleteButton();
   updateCutButtons();
+  updateDownloadButton();
 }
 
 // ---- Cut / paste (move files or whole folders between folders / roots) ----
@@ -1720,17 +1742,10 @@ function renderFolders() {
     num.textContent = String(count ?? "");
     el.append(name, num);
     el.addEventListener("click", (event) => {
-      selectedSet.clear(); // 文件与文件夹的选择互斥，Delete/剪切 只作用于当前聚焦的那一类
+      selectedSet.clear(); // 文件与文件夹的选择互斥，Delete/剪切/下载 只作用于当前聚焦的那一类
       if (virtual) {
         folderSelection.clear();
         folderAnchor = null;
-        selectFolder(path);
-        return;
-      }
-      if (event.ctrlKey || event.metaKey) {
-        if (folderSelection.has(path)) folderSelection.delete(path);
-        else folderSelection.add(path);
-        folderAnchor = path;
         selectFolder(path);
         return;
       }
@@ -1740,10 +1755,13 @@ function renderFolders() {
         if (from >= 0 && to >= 0) {
           for (let i = Math.min(from, to); i <= Math.max(from, to); i++) folderSelection.add(realFolderPaths[i]);
         }
+        folderAnchor = path;
         selectFolder(path);
         return;
       }
-      folderSelection.clear();
+      // 单击文件夹 = 选中，再单击 = 取消（Ctrl/⌘ 同义；不再需要"先清空再单选"）
+      if (folderSelection.has(path)) folderSelection.delete(path);
+      else folderSelection.add(path);
       folderAnchor = path;
       selectFolder(path);
     });
