@@ -117,6 +117,8 @@ const I18N = {
     downloadSelectionTip: (n) => `下载选中的 ${n} 项（文件夹自动打包成 zip）`,
     downloadTip: "下载选中的文件（多选自动打包成 zip；未勾选则下载节点当前图）",
     downloadFolder: "下载文件夹",
+    downloadFolderWithCount: (n) => `下载文件夹 (${n})`,
+    downloadFolderSelectionTip: (n) => `下载选中的 ${n} 个文件夹（打包成一个 zip）`,
     downloadFolderTip: "把当前文件夹整体打包成 zip 下载",
     downloadNothing: "先勾选要下载的文件，或在节点里选中这个根里的某张图。",
     downloadVirtualFolder: "「最近上传 / 最近使用」是聚合视图，不能整目录下载；请先切到真实文件夹，或勾选要下载的图片。",
@@ -211,6 +213,8 @@ const I18N = {
     downloadSelectionTip: (n) => `Download the ${n} checked item(s) — folders are zipped`,
     downloadTip: "Download the checked files (several are zipped; without a selection the node's current image is downloaded)",
     downloadFolder: "Download folder",
+    downloadFolderWithCount: (n) => `Download folder (${n})`,
+    downloadFolderSelectionTip: (n) => `Download the ${n} selected folder(s) as one zip`,
     downloadFolderTip: "Download the whole current folder as one zip",
     downloadNothing: "Check the files to download first, or pick one from this root in the node.",
     downloadVirtualFolder: "「Recently uploaded / Recently used」 are aggregated views — switch to a real folder, or check the images you want.",
@@ -1087,14 +1091,21 @@ function downloadTargets() {
   return item && (item.root || "input") === rootId ? [item.relpath] : [];
 }
 
-// 只读根上「下载」按钮的文案：带上选中数量，让人一眼看到这次会下载什么
+// 只读根上「下载 / 下载文件夹」两个按钮的文案：带上选中数量，让人一眼看到这次会下载什么
 function updateDownloadButton() {
-  if (WRITE_ROOTS.includes(currentRoot || "input")) return; // 可写根那个位置是「上传」，由 updateRootActions 管
+  if (WRITE_ROOTS.includes(currentRoot || "input")) return; // 可写根那两个位置是「上传」，由 updateRootActions 管
   const btn = dialog?.querySelector(".tm-upload");
-  if (!btn) return;
-  const count = downloadTargets().length;
-  btn.textContent = count ? t("downloadWithCount", count) : t("download");
-  btn.title = count ? t("downloadSelectionTip", count) : t("downloadTip");
+  if (btn) {
+    const count = downloadTargets().length;
+    btn.textContent = count ? t("downloadWithCount", count) : t("download");
+    btn.title = count ? t("downloadSelectionTip", count) : t("downloadTip");
+  }
+  const folderBtn = dialog?.querySelector(".tm-upload-folder");
+  if (folderBtn) {
+    const picked = selectionTargets().length;
+    folderBtn.textContent = picked ? t("downloadFolderWithCount", picked) : t("downloadFolder");
+    folderBtn.title = picked ? t("downloadFolderSelectionTip", picked) : t("downloadFolderTip");
+  }
 }
 
 function startBrowserDownload(url) {
@@ -1108,23 +1119,35 @@ function startBrowserDownload(url) {
   setTimeout(() => link.remove(), 2000);
 }
 
+// 只取"选中项"（文件 + 文件夹），不做"节点当前图"回落——给侧栏「下载文件夹」用
+function selectionTargets() {
+  return [...folderSelection, ...selectedSet];
+}
+
+function downloadSelectedPaths(targets) {
+  const qs = new URLSearchParams({ root: currentRoot || "input" });
+  for (const relpath of targets) qs.append("relpath", relpath);
+  startBrowserDownload(api.apiURL(`/thumbnails-modern/download?${qs.toString()}`));
+}
+
 function downloadSelection() {
   const targets = downloadTargets();
   if (!targets.length) {
     alert(t("downloadNothing"));
     return;
   }
-  const qs = new URLSearchParams({ root: currentRoot || "input" });
-  for (const relpath of targets) qs.append("relpath", relpath);
-  startBrowserDownload(api.apiURL(`/thumbnails-modern/download?${qs.toString()}`));
+  downloadSelectedPaths(targets);
 }
 
+// 侧栏「下载文件夹」：有选中项就下载**全部选中项**（与顶部按钮、删除按钮同口径），
+// 否则才下载当前浏览的文件夹。此前只认 currentFolder，导致多选后只下到最后一个点选的文件夹。
 function downloadCurrentFolder() {
+  const targets = selectionTargets();
+  if (targets.length) {
+    downloadSelectedPaths(targets);
+    return;
+  }
   if (isVirtualFolder(currentFolder)) {
-    if (selectedSet.size) {
-      downloadSelection();
-      return;
-    }
     alert(t("downloadVirtualFolder"));
     return;
   }
