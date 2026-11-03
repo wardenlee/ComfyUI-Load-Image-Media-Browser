@@ -5,8 +5,11 @@ import os
 import re
 import shutil
 import time
+import uuid
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import numpy as np
 import torch
@@ -737,12 +740,20 @@ async def thumbnails_modern_folder_path(request):
 
 
 WRITABLE_ROOTS = ("input", "code_input")
+# 删除：output 也允许（「删除文件夹」本来就能作用于 output，这里让单文件删除行为一致）
+DELETE_ROOTS = ("input", "code_input", "output")
+# 下载：任何浏览根都可以
+DOWNLOAD_ROOTS = ("input", "output", "code_input")
+DOWNLOAD_DIR_NAME = "_tm_downloads"
+DOWNLOAD_MAX_FILES = 5000
+DOWNLOAD_MAX_BYTES = 4 * 1024 * 1024 * 1024
+DOWNLOAD_TTL_SECONDS = 3600
 
 
 def _delete_file(relpath: str, root_id: str = "input") -> Dict[str, object]:
-    """Delete one file inside a writable root (input or 输入)."""
-    if root_id not in WRITABLE_ROOTS:
-        return {"ok": False, "error": "Deleting is only supported in the input root and the 输入 folder"}
+    """Delete one file inside a deletable root (input / 输入 / output)."""
+    if root_id not in DELETE_ROOTS:
+        return {"ok": False, "error": f"Deleting is not supported in this root: {root_id}"}
     try:
         base = _root_dir(root_id)
         rel = _safe_rel_path(_split_annotation(relpath)[0])
@@ -779,6 +790,141 @@ async def thumbnails_modern_delete(request):
         return web.json_response(result)
     status = 404 if result.get("error") == "File not found" else 400
     return web.json_response(result, status=status)
+
+
+def _download_dir() -> Path:
+    directory = Path(folder_paths.get_temp_directory()).resolve() / DOWNLOAD_DIR_NAME
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _prune_downloads(directory: Path) -> None:
+    """尽力而为：清掉超过 TTL 的临时 zip。"""
+    try:
+        now = time.time()
+        for item in directory.glob("*.zip"):
+            try:
+                if now - item.stat().st_mtime > DOWNLOAD_TTL_SECONDS:
+                    item.unlink()
+            except OSError:
+                continue
+    except Exception:
+        return
+
+
+def _attachment_header(name: str) -> str:
+    """Content-Disposition，非 ASCII 文件名走 RFC 5987。"""
+    fallback = name.encode("ascii", "ignore").decode("ascii").strip() or "download"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name)}"
+
+
+def _collect_download_files(root_id: str, folder: str, relpaths: List[str]) -> List[Path]:
+    base = _root_dir(root_id)
+    files: List[Path] = []
+    if relpaths:
+        for relpath in relpaths:
+            _b, _rel, target = _resolve_media_path(root_id, relpath)
+            if not target.exists():
+                raise ValueError(f"Not found: {relpath}")
+            if target.is_file():
+                files.append(target)
+            else:
+                files.extend(sorted(path for path in target.rglob("*") if path.is_file()))
+    else:
+        rel_folder = "" if str(folder or "").strip() in ("", ".") else _safe_rel_path(folder)
+        target = base if not rel_folder else (base / rel_folder).resolve()
+        if base != target and base not in target.parents:
+            raise ValueError("Folder is outside the media root")
+        if not target.is_dir():
+            raise ValueError("Folder not found")
+        files = sorted(path for path in target.rglob("*") if path.is_file())
+
+    seen = set()
+    unique: List[Path] = []
+    for path in files:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _build_zip(files: List[Path], base: Path, dest: Path) -> int:
+    total = 0
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in files:
+            try:
+                arcname = path.relative_to(base).as_posix()
+            except ValueError:
+                arcname = path.name
+            archive.write(path, arcname)
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+@PromptServer.instance.routes.get("/thumbnails-modern/download")
+async def thumbnails_modern_download(request):
+    """下载一个文件、多选的一批文件，或整个文件夹（zip）。任何浏览根都可用。"""
+    query = request.rel_url.query
+    root_id = (query.get("root", "input") or "input").lower()
+    folder = query.get("folder", "") or ""
+    relpaths = [value for value in query.getall("relpath", []) if value]
+    if root_id not in DOWNLOAD_ROOTS:
+        return web.json_response({"ok": False, "error": f"Unknown media root: {root_id}"}, status=400)
+    try:
+        base = _root_dir(root_id)
+        files = _collect_download_files(root_id, folder, relpaths)
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
+    if not files:
+        return web.json_response({"ok": False, "error": "Nothing to download"}, status=404)
+
+    total_size = 0
+    for path in files:
+        try:
+            total_size += path.stat().st_size
+        except OSError:
+            continue
+    if len(files) > DOWNLOAD_MAX_FILES or total_size > DOWNLOAD_MAX_BYTES:
+        return web.json_response(
+            {
+                "ok": False,
+                "error": f"Too large for one download: {len(files)} files / {total_size // (1024 * 1024)} MB "
+                         f"(limit {DOWNLOAD_MAX_FILES} files / {DOWNLOAD_MAX_BYTES // (1024 * 1024)} MB)",
+            },
+            status=400,
+        )
+
+    # 单个文件：直接回原文件，不打 zip
+    if len(files) == 1:
+        response = web.FileResponse(files[0])
+        response.headers["Content-Disposition"] = _attachment_header(files[0].name)
+        return response
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    if str(folder or "").strip() in ("", "."):
+        zip_name = f"{root_id}-{stamp}.zip"
+    else:
+        zip_name = f"{root_id}-{str(folder).replace('/', '_')}-{stamp}.zip"
+    directory = _download_dir()
+    _prune_downloads(directory)
+    dest = directory / f"{stamp}-{uuid.uuid4().hex[:8]}.zip"
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, _build_zip, files, base, dest)
+    except Exception as exc:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        return web.json_response({"ok": False, "error": f"Zip failed: {exc}"}, status=500)
+    response = web.FileResponse(dest)
+    response.headers["Content-Disposition"] = _attachment_header(zip_name)
+    return response
 
 
 def _save_upload(root_id: str, subfolder: str, filename: str, data: bytes) -> Dict[str, object]:

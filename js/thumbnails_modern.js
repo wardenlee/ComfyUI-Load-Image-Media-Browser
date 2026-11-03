@@ -34,6 +34,8 @@ let refreshTimer = null;
 const REFRESH_INTERVAL_MS = 5000;
 // 可写根：ComfyUI input 与左侧「输入」(/tmp/code/input)；output 保持只读
 const WRITE_ROOTS = ["input", "code_input"];
+// 删除：output 也允许（后端 DELETE_ROOTS 同口径；「删除文件夹」本来就是全根可用）
+const DELETE_ROOTS = ["input", "code_input", "output"];
 const STORAGE_KEY_LAST_FOLDER = "thumbnailsModern.lastFolder";
 const STORAGE_KEY_LAST_ROOT = "thumbnailsModern.lastRoot";
 const DEFAULT_ROOT_ID = "code_input"; // 默认显示「输入」(/tmp/code/input)
@@ -110,6 +112,12 @@ const I18N = {
     search: "搜索文件或文件夹",
     uploadFolder: "上传文件夹",
     uploadFolderTip: "上传整个文件夹（保留子目录结构）",
+    download: "下载",
+    downloadTip: "下载选中的文件（多选自动打包成 zip；未勾选则下载节点当前图）",
+    downloadFolder: "下载文件夹",
+    downloadFolderTip: "把当前文件夹整体打包成 zip 下载",
+    downloadNothing: "先勾选要下载的文件，或在节点里选中这个根里的某张图。",
+    downloadVirtualFolder: "「最近上传 / 最近使用」是聚合视图，不能整目录下载；请先切到真实文件夹，或勾选要下载的图片。",
     copyPath: "复制路径",
     copyPathTip: "复制所选文件夹的绝对路径",
     deleteFolder: "删除文件夹",
@@ -196,6 +204,12 @@ const I18N = {
     search: "Search file or folder",
     uploadFolder: "Upload folder",
     uploadFolderTip: "Upload an entire folder (subfolders preserved)",
+    download: "Download",
+    downloadTip: "Download the checked files (several are zipped; without a selection the node's current image is downloaded)",
+    downloadFolder: "Download folder",
+    downloadFolderTip: "Download the whole current folder as one zip",
+    downloadNothing: "Check the files to download first, or pick one from this root in the node.",
+    downloadVirtualFolder: "「Recently uploaded / Recently used」 are aggregated views — switch to a real folder, or check the images you want.",
     copyPath: "Copy path",
     copyPathTip: "Copy the absolute path of the selected folder",
     deleteFolder: "Delete folder",
@@ -644,8 +658,14 @@ function ensureDialog() {
   });
   overlay.querySelector(".tm-close").addEventListener("click", closeDialog);
   overlay.querySelector(".tm-refresh").addEventListener("click", () => openDialog(currentNode, true));
-  overlay.querySelector(".tm-upload").addEventListener("click", triggerUpload);
-  overlay.querySelector(".tm-upload-folder").addEventListener("click", uploadFolder);
+  overlay.querySelector(".tm-upload").addEventListener("click", () => {
+    if (WRITE_ROOTS.includes(currentRoot || "input")) triggerUpload();
+    else downloadSelection();
+  });
+  overlay.querySelector(".tm-upload-folder").addEventListener("click", () => {
+    if (WRITE_ROOTS.includes(currentRoot || "input")) uploadFolder();
+    else downloadCurrentFolder();
+  });
   overlay.querySelector(".tm-multi").addEventListener("click", toggleMultiSelect);
   overlay.querySelector(".tm-cut").addEventListener("click", cutFiles);
   overlay.querySelector(".tm-paste").addEventListener("click", pasteCutFiles);
@@ -1045,6 +1065,53 @@ async function handleDroppedTransfer(dt, targetFolder = null) {
   await uploadFileEntries(picked, ".tm-upload", targetFolder);
 }
 
+// ---- 下载：单文件直下；多文件/整目录由后端打包成 zip（只读根上替代「上传」按钮） ----
+function downloadTargets() {
+  const rootId = currentRoot || "input";
+  if (selectedSet.size) return [...selectedSet];
+  const value = widgetForNode(currentNode)?.value || "";
+  const plain = stripAnnotation(value);
+  const valueRoot = annotationOf(value) || "input";
+  if (plain && valueRoot === rootId) return [plain];
+  const item = focusedItem();
+  return item && (item.root || "input") === rootId ? [item.relpath] : [];
+}
+
+function startBrowserDownload(url) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.rel = "noopener";
+  link.download = "";
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  setTimeout(() => link.remove(), 2000);
+}
+
+function downloadSelection() {
+  const targets = downloadTargets();
+  if (!targets.length) {
+    alert(t("downloadNothing"));
+    return;
+  }
+  const qs = new URLSearchParams({ root: currentRoot || "input" });
+  for (const relpath of targets) qs.append("relpath", relpath);
+  startBrowserDownload(api.apiURL(`/thumbnails-modern/download?${qs.toString()}`));
+}
+
+function downloadCurrentFolder() {
+  if (isVirtualFolder(currentFolder)) {
+    if (selectedSet.size) {
+      downloadSelection();
+      return;
+    }
+    alert(t("downloadVirtualFolder"));
+    return;
+  }
+  const qs = new URLSearchParams({ root: currentRoot || "input", folder: currentFolder === "." ? "" : currentFolder });
+  startBrowserDownload(api.apiURL(`/thumbnails-modern/download?${qs.toString()}`));
+}
+
 // ---- Multi-select delete ----
 function toggleMultiSelect(force) {
   multiSelect = typeof force === "boolean" ? force : !multiSelect;
@@ -1061,7 +1128,7 @@ function toggleMultiSelect(force) {
 function updateDeleteButton() {
   const btn = dialog?.querySelector(".tm-delete");
   if (btn) {
-    const fileCount = multiSelect && WRITE_ROOTS.includes((currentRoot || "input")) ? selectedSet.size : 0;
+    const fileCount = multiSelect && DELETE_ROOTS.includes((currentRoot || "input")) ? selectedSet.size : 0;
     const count = folderSelection.size || fileCount;
     btn.disabled = count === 0;
     btn.textContent = count > 0 ? t("deleteWithCount", count) : t("delete");
@@ -1083,11 +1150,18 @@ function updateFolderDeleteButton() {
 
 function updateRootActions() {
   const isWritable = WRITE_ROOTS.includes((currentRoot || "input"));
-  for (const sel of [".tm-upload", ".tm-upload-folder"]) {
-    const btn = dialog?.querySelector(sel);
-    if (!btn) continue;
-    btn.disabled = !isWritable;
-    btn.title = isWritable ? (btn.dataset.tip || t("upload")) : t("writeRootOnlyTip");
+  // 只读根（output）：这两个按钮变成「下载」，而不是灰掉
+  const uploadBtn = dialog?.querySelector(".tm-upload");
+  if (uploadBtn) {
+    uploadBtn.disabled = false;
+    uploadBtn.textContent = isWritable ? t("upload") : t("download");
+    uploadBtn.title = isWritable ? t("uploadTip") : t("downloadTip");
+  }
+  const folderBtn = dialog?.querySelector(".tm-upload-folder");
+  if (folderBtn) {
+    folderBtn.disabled = false;
+    folderBtn.textContent = isWritable ? t("uploadFolder") : t("downloadFolder");
+    folderBtn.title = isWritable ? t("uploadFolderTip") : t("downloadFolderTip");
   }
   updateFolderDeleteButton();
   updateDeleteButton();
@@ -1800,7 +1874,7 @@ function renderGrid() {
         openZoom(item);
       });
       actions.appendChild(view);
-      if (canDelete && WRITE_ROOTS.includes(item.root || "input")) {
+      if (canDelete && DELETE_ROOTS.includes(item.root || "input")) {
         const del = document.createElement("button");
         del.className = "tm-btn tm-danger";
         del.textContent = t("delete");
@@ -2211,7 +2285,7 @@ function openContextMenu(event, item) {
     updateCutButtons();
     renderGrid();
   });
-  if (getSettingValue(SETTINGS.deleteEnabled, true) && WRITE_ROOTS.includes(rootId)) {
+  if (getSettingValue(SETTINGS.deleteEnabled, true) && DELETE_ROOTS.includes(rootId)) {
     addItem(t("menuDelete"), async () => {
       if (!confirm(t("deleteFileConfirm", item.relpath))) return;
       await deleteImage(item.relpath, rootId);
