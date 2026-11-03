@@ -542,7 +542,9 @@ function ensureStyles() {
     .tm-grid-status .tm-batch-status{opacity:1;color:#8fc7ff}
     .tm-repeat{display:inline-flex;align-items:center;gap:2px}
     .tm-repeat .tm-btn{padding:4px 8px;line-height:1}
-    .tm-repeat-input{width:46px;box-sizing:border-box;text-align:center;border:1px solid var(--border-color, #555);background:var(--comfy-input-bg, #2c2c2c);color:inherit;border-radius:8px;padding:5px 4px}
+    .tm-repeat-input{width:46px;box-sizing:border-box;text-align:center;border:1px solid var(--border-color, #555);background:var(--comfy-input-bg, #2c2c2c);color:inherit;border-radius:8px;padding:5px 4px;appearance:textfield;-moz-appearance:textfield}
+    /* 前后已有 − / + 按钮：隐去数字框自带的上下箭头，避免功能重复 */
+    .tm-repeat-input::-webkit-outer-spin-button,.tm-repeat-input::-webkit-inner-spin-button{-webkit-appearance:none;appearance:none;margin:0}
     .tm-folder.tm-selected{background:rgba(74,158,255,.16);box-shadow:inset 0 0 0 1px rgba(74,158,255,.55)}
     .tm-folder.tm-drop-target{background:rgba(74,158,255,.28);outline:1px solid #4a9eff;outline-offset:-1px}
     .tm-btn.active{border-color:#4a9eff;background:rgba(74,158,255,.18)}
