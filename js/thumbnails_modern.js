@@ -102,7 +102,7 @@ const I18N = {
     deleteWithCount: (n) => `删除 (${n})`,
     deleteFoldersConfirm: (n, list) => `删除选中的 ${n} 个文件夹及其全部内容？\n${list}`,
     moveResult: (ok, failedCount, list) => failedCount ? `已移动 ${ok} 项，${failedCount} 项失败：\n${list}` : `已移动 ${ok} 项`,
-    folderMultiHint: "点击文件夹=选中，再点=取消；Ctrl 逐个、Shift 区间；选中后可下载 / 删除 / 剪切",
+    folderMultiHint: "点击=单选（再点=取消）；开「多选」或按 Ctrl 才逐个累积；Shift 连选区间；选中后可下载 / 删除 / 剪切",
     deleteFolderConfirm: (label, count) => `删除文件夹「${label}」${count ? `及其内部 ${count} 个文件` : ""}？\n此操作不可撤销。`,
     refresh: "刷新",
     close: "关闭",
@@ -198,7 +198,7 @@ const I18N = {
     deleteWithCount: (n) => `Delete (${n})`,
     deleteFoldersConfirm: (n, list) => `Delete ${n} selected folder(s) and everything inside them?\n${list}`,
     moveResult: (ok, failedCount, list) => failedCount ? `Moved ${ok}, ${failedCount} failed:\n${list}` : `Moved ${ok}`,
-    folderMultiHint: "Click a folder to select it, click again to deselect; Ctrl toggles, Shift selects a range; the selection feeds Download / Delete / Cut",
+    folderMultiHint: "Click selects one folder, click again deselects; with Multi on (or Ctrl held) clicks accumulate, Shift selects a range; the selection feeds Download / Delete / Cut",
     deleteFolderConfirm: (label, count) => `Delete folder "${label}"${count ? ` and all ${count} file(s) inside` : ""}?\nThis cannot be undone.`,
     refresh: "Refresh",
     close: "Close",
@@ -1159,8 +1159,7 @@ function downloadCurrentFolder() {
 function toggleMultiSelect(force) {
   multiSelect = typeof force === "boolean" ? force : !multiSelect;
   if (!multiSelect) selectedSet.clear();
-  folderSelection.clear();
-  folderAnchor = null;
+  // 注意：不清 folderSelection —— 开多选时，已选中的那个文件夹正好是"第一个"，从这里继续加选
   rangeAnchor = -1;
   const multiBtn = dialog?.querySelector(".tm-multi");
   if (multiBtn) multiBtn.classList.toggle("active", multiSelect);
@@ -1782,9 +1781,18 @@ function renderFolders() {
         selectFolder(path);
         return;
       }
-      // 单击文件夹 = 选中，再单击 = 取消（Ctrl/⌘ 同义；不再需要"先清空再单选"）
-      if (folderSelection.has(path)) folderSelection.delete(path);
-      else folderSelection.add(path);
+      // 多选只在「开了多选模式」或「按了 Ctrl/⌘/Shift（快捷键）」时生效；
+      // 平点是单选：点别的文件夹会替换当前选择，点已选中的那个则取消选中。
+      const multiOn = multiSelect || event.ctrlKey || event.metaKey;
+      if (multiOn) {
+        if (folderSelection.has(path)) folderSelection.delete(path);
+        else folderSelection.add(path);
+      } else if (folderSelection.size === 1 && folderSelection.has(path)) {
+        folderSelection.clear();
+      } else {
+        folderSelection.clear();
+        folderSelection.add(path);
+      }
       folderAnchor = path;
       selectFolder(path);
     });
@@ -2021,6 +2029,8 @@ function selectAllVisible() {
   if (!images.length) return;
   const keepFocus = focusedIndex;
   if (!multiSelect) toggleMultiSelect(true);
+  folderSelection.clear(); // Ctrl+A 是"选全部文件"，与文件夹选择互斥
+  folderAnchor = null;
   for (const item of images) selectedSet.add(item.relpath);
   renderGrid();
   if (keepFocus >= 0) setFocused(keepFocus, false);
