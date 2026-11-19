@@ -32,13 +32,13 @@ let cutBuffer = [];
 const cutSet = new Set();
 let refreshTimer = null;
 const REFRESH_INTERVAL_MS = 5000;
-// 可写根：ComfyUI input 与左侧「输入」(/tmp/code/input)；output 保持只读
-const WRITE_ROOTS = ["input", "code_input"];
+// 可写根：只有 ComfyUI 原生 input；output 只读（不接收上传）
+const WRITE_ROOTS = ["input"];
 // 删除：output 也允许（后端 DELETE_ROOTS 同口径；「删除文件夹」本来就是全根可用）
-const DELETE_ROOTS = ["input", "code_input", "output"];
+const DELETE_ROOTS = ["input", "output"];
 const STORAGE_KEY_LAST_FOLDER = "thumbnailsModern.lastFolder";
 const STORAGE_KEY_LAST_ROOT = "thumbnailsModern.lastRoot";
-const DEFAULT_ROOT_ID = "code_input"; // 默认显示「输入」(/tmp/code/input)
+const DEFAULT_ROOT_ID = "input"; // 默认显示原生 input 目录
 // 缩略图宽度档位：按卡片显示尺寸向上取档，避免为每张图生成多份缓存
 const THUMB_WIDTHS = [256, 384, 512, 768, 1024];
 // 网格分批渲染：首批 RENDER_BATCH 张，滚到接近底部再追加
@@ -72,7 +72,7 @@ function getSettingValue(id, fallback) {
 }
 
 // ---- 界面语言：跟随 ComfyUI 的语言设置（中 / 英），探测多个来源，兜底英文 ----
-// 只覆盖面板自身的按钮 / 标签 / 提示；节点名、根目录名（input/输入…）来自后端，不在此处翻译。
+// 只覆盖面板自身的按钮 / 标签 / 提示；节点名、根目录名（input/output…）来自后端，不在此处翻译。
 const I18N = {
   zh: {
     images: "图片",
@@ -152,7 +152,7 @@ const I18N = {
     batchConfirmAll: (n) => `未勾选任何图片：按顺序批跑当前视图的全部 ${n} 张？\n（前一张跑完才提交下一张）`,
     batchInterrupted: (message) => `批跑中断：${message}`,
     noSupported: "没有可上传的媒体文件。",
-    readOnlyRoot: "当前根目录是只读的（output），请先切到 input 或 输入 再拖入。",
+    readOnlyRoot: "当前根目录是只读的（output），请先切到 input 再拖入。",
     uploadSummary: (ok, skipped, failed, landing) => `上传完成：成功 ${ok}，跳过（已存在）${skipped}，失败 ${failed}\n写入目录：${landing}`,
     virtualDelete: "「最近上传 / 最近使用」是聚合视图，不能整体删除；请先切到真实文件夹。",
     noMatch: "这个文件夹里没有符合条件的媒体。",
@@ -169,7 +169,7 @@ const I18N = {
       ? `已删除 ${ok} 个文件，${failedCount} 个失败：\n${list}`
       : `已删除 ${ok} 个文件`,
     actionFailed: (label, message) => `${label}失败：${message}`,
-    writeRootOnlyTip: "只有 input / 输入 根可用",
+    writeRootOnlyTip: "仅 input 根可上传",
     folderDeleteDisabledTip: "先选一个真实文件夹（媒体根目录与聚合视图都不能删）",
   },
   en: {
@@ -250,7 +250,7 @@ const I18N = {
     batchConfirmAll: (n) => `Nothing is checked: run all ${n} images currently shown, one at a time?\n(the next one starts only after the previous job finished)`,
     batchInterrupted: (message) => `Batch run aborted: ${message}`,
     noSupported: "No supported media files.",
-    readOnlyRoot: "This root is read-only (output) — switch to input or 输入 before dropping.",
+    readOnlyRoot: "This root is read-only (output) — switch to input before dropping.",
     uploadSummary: (ok, skipped, failed, landing) => `Upload finished: ${ok} ok, ${skipped} skipped (already exists), ${failed} failed\nWritten to: ${landing}`,
     virtualDelete: "「Recently uploaded / Recently used」 are aggregated views and cannot be deleted as a folder — switch to a real folder first.",
     noMatch: "No matching media found in this folder.",
@@ -267,7 +267,7 @@ const I18N = {
       ? `Deleted ${ok} file(s), ${failedCount} failed:\n${list}`
       : `Deleted ${ok} file(s)`,
     actionFailed: (label, message) => `${label} failed: ${message}`,
-    writeRootOnlyTip: "Only available in the input / 输入 roots",
+    writeRootOnlyTip: "Only available in the input root",
     folderDeleteDisabledTip: "Select a real folder first (the media root and the aggregated views cannot be deleted)",
   },
 };
@@ -331,7 +331,7 @@ function normalizeFolder(value) {
 }
 
 // ComfyUI's mask editor / painter use "<file> [input]"; this browser also writes
-// "<file> [<root>]" for output / 输入, and the backend resolves any browse root.
+// "<file> [<root>]" for the output root, and the backend resolves any browse root.
 const ANNOTATION_SUFFIX_RE = /\s*\[([A-Za-z0-9_]+)\]\s*$/;
 
 function stripAnnotation(value) {
@@ -348,7 +348,7 @@ function annotationOf(value) {
 }
 
 // Widget value for an item: files outside the input root carry the root
-// annotation suffix ("<file> [output]", "<file> [code_input]").
+// annotation suffix ("<file> [output]").
 function itemValue(item) {
   const rel = String(item?.relpath || "");
   const root = item?.root || "input";
@@ -394,7 +394,7 @@ function rememberFolder(node, folder) {
   } catch {}
 }
 
-// ---- 记住「最近一次浏览的根目录」（默认「输入」） ----
+// ---- 记住「最近一次浏览的根目录」（默认 input） ----
 function getRememberedRoot(node) {
   const nodeRoot = node?.properties?.tmCurrentRoot;
   if (typeof nodeRoot === "string" && nodeRoot) return nodeRoot;
@@ -1456,7 +1456,7 @@ function triggerUpload() {
 }
 
 function canSelectItem(item, node = currentNode) {
-  // 三个根（input / output / 输入）的图都能直接选进节点：
+  // 两个根（input / output）的图都能直接选进节点：
   // 非 input 根会写成 "<file> [<root>]"，由后端 _resolve_input_file 解析
   const mode = mediaModeForNode(node);
   if (mode === "video") return item?.media_type === "video";
@@ -2516,7 +2516,7 @@ async function openDialog(node, refresh = false) {
   }
   const widgetValue = widgetForNode(node)?.value || "";
   const widgetValueRoot = annotationOf(widgetValue) || splitRelpath(widgetValue).root;
-  // 首次默认「输入」；之后每次进入面板都回到上一次浏览的根目录
+  // 首次默认 input；之后每次进入面板都回到上一次浏览的根目录
   const rememberedRoot = getRememberedRoot(node);
   const preferredRoot = rememberedRoot || DEFAULT_ROOT_ID;
   currentRoot = roots.some((r) => r.id === preferredRoot)

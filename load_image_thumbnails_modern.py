@@ -20,7 +20,7 @@ import folder_paths
 from server import PromptServer
 import nodes
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 ALLOWED_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".jxl", ".apng", ".ico"
 }
@@ -115,11 +115,12 @@ def _is_supported_media(path: Path) -> bool:
 
 
 def _media_roots() -> List[Dict[str, str]]:
-    """Browse roots: ComfyUI input, output, and an extra "输入" source folder.
+    """Browse roots: just ComfyUI's native input and output directories.
 
-    The extra root (/tmp/code/input) is a plain media folder the user keeps
-    source images in; images there are browse-only (cut/paste them into the
-    ComfyUI input root to use them in a node).
+    There used to be a third, hardcoded "输入" root (/tmp/code/input). That was
+    only useful while the native input directory pointed somewhere else; once
+    /tmp/code/input is set as ComfyUI's own input directory the extra root is a
+    duplicate that breaks upload/drop targeting, so it has been removed.
     """
     roots = [{"id": "input", "label": "input", "dir": str(_input_root())}]
     try:
@@ -128,17 +129,6 @@ def _media_roots() -> List[Dict[str, str]]:
         out_dir = None
     if out_dir is not None and out_dir.is_dir() and out_dir != _input_root():
         roots.append({"id": "output", "label": "output", "dir": str(out_dir)})
-
-    code_dir = Path("/tmp/code/input")
-    try:
-        if not code_dir.is_dir() and os.name == "posix":
-            code_dir.mkdir(parents=True, exist_ok=True)
-        if code_dir.is_dir():
-            resolved = code_dir.resolve()
-            if resolved != _input_root() and (out_dir is None or resolved != out_dir):
-                roots.append({"id": "code_input", "label": "输入", "dir": str(resolved)})
-    except Exception:
-        pass
     return roots
 
 
@@ -739,11 +729,11 @@ async def thumbnails_modern_folder_path(request):
     return web.json_response({"ok": True, "path": str(target)})
 
 
-WRITABLE_ROOTS = ("input", "code_input")
+WRITABLE_ROOTS = ("input",)
 # 删除：output 也允许（「删除文件夹」本来就能作用于 output，这里让单文件删除行为一致）
-DELETE_ROOTS = ("input", "code_input", "output")
+DELETE_ROOTS = ("input", "output")
 # 下载：任何浏览根都可以
-DOWNLOAD_ROOTS = ("input", "output", "code_input")
+DOWNLOAD_ROOTS = ("input", "output")
 DOWNLOAD_DIR_NAME = "_tm_downloads"
 DOWNLOAD_MAX_FILES = 5000
 DOWNLOAD_MAX_BYTES = 4 * 1024 * 1024 * 1024
@@ -751,7 +741,7 @@ DOWNLOAD_TTL_SECONDS = 3600
 
 
 def _delete_file(relpath: str, root_id: str = "input") -> Dict[str, object]:
-    """Delete one file inside a deletable root (input / 输入 / output)."""
+    """Delete one file inside a deletable root (input / output)."""
     if root_id not in DELETE_ROOTS:
         return {"ok": False, "error": f"Deleting is not supported in this root: {root_id}"}
     try:
@@ -928,9 +918,9 @@ async def thumbnails_modern_download(request):
 
 
 def _save_upload(root_id: str, subfolder: str, filename: str, data: bytes) -> Dict[str, object]:
-    """Write one uploaded file into a writable root (input or 输入)."""
+    """Write one uploaded file into the native input root."""
     if root_id not in WRITABLE_ROOTS:
-        return {"ok": False, "error": "Uploads are only supported in the input root and the 输入 folder"}
+        return {"ok": False, "error": "Uploads are only supported in the input root"}
     name = os.path.basename(str(filename or "").replace("\\", "/"))
     if not name or name in (".", ".."):
         return {"ok": False, "error": "Invalid file name"}

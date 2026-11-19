@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.3
+
+### Removed
+
+- the hardcoded extra **输入** root (`/tmp/code/input`). The native `input` directory is now the only input root: when `/tmp/code/input` is passed as `--input-directory`, the extra root pointed at the same folder and only duplicated the tree, making upload / drop / delete targets ambiguous
+- no compatibility shim for the old `"<file> [code_input]"` annotation values (pre-1.0.3 workflows that reference them are not migrated)
+
+### Changed
+
+- `WRITABLE_ROOTS` / `WRITE_ROOTS` → `input` only; `DELETE_ROOTS` / `DOWNLOAD_ROOTS` → `input` + `output`
+- `DEFAULT_ROOT_ID` → `input` (the browser used to open on the removed root and silently fall back to another one)
+- tooltips, the read-only-root hint, comments and the README no longer mention the `输入` root
+- version 1.0.3
+
 ## 1.0.2
 
 ### Added
